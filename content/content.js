@@ -15,9 +15,19 @@ const normalizeLargeChangeLimit = value => {
   return Math.min(Math.max(parsed, MIN_LARGE_CHANGE_LIMIT), MAX_LARGE_CHANGE_LIMIT);
 };
 
-const getLargeChangeLimit = async () => {
-  const { largeChangeLimit } = await chrome.storage.sync.get('largeChangeLimit');
-  return normalizeLargeChangeLimit(largeChangeLimit);
+const normalizeDiffView = value => ['original', 'changes', 'full', 'side-by-side', 'side-by-side-changes'].includes(value) ? value : 'side-by-side-changes';
+const normalizeContextLines = value => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 20) : 0;
+};
+
+const getDiffSettings = async () => {
+  const data = await chrome.storage.sync.get(['largeChangeLimit', 'diffView', 'contextLines']);
+  return {
+    largeChangeLimit: normalizeLargeChangeLimit(data.largeChangeLimit),
+    diffView: normalizeDiffView(data.diffView),
+    contextLines: normalizeContextLines(data.contextLines),
+  };
 };
 
 const normalizeDomainPattern = domain => {
@@ -114,33 +124,22 @@ const DiffHighlighter = {
       if (extensionEnabled === false) return;
 
       const diffContainers = this.findDiffContainers();
-      const largeChangeLimit = await getLargeChangeLimit();
+      const settings = await getDiffSettings();
 
       for (const [index, container] of diffContainers.entries()) {
         if (!container || !(container instanceof HTMLElement)) continue;
         if (container.querySelector('.enhanced-diff')) continue;
         if (this.isForbiddenContainer(container)) continue;
 
-        if (container.children.length !== 3) continue;
+        const values = this.getDiffValues(container);
+        if (!values) continue;
+        const { oldText, newText } = values;
 
-        const oldNode = container.children[0];
-        const newNode = container.children[2];
-
-        const oldText = oldNode?.textContent || '';
-        const newText = newNode?.textContent || '';
-
-        if (!oldText || !newText) {
-          console.error('Error: Expected diff child elements not found in container');
-          continue;
-        }
-
-        const containerId = `diff-container-${Date.now()}-${index}`;
-        container.id = containerId;
-
+        container.id = `diff-container-${Date.now()}-${index}`;
         const originalContent = container.innerHTML;
-        await chrome.storage.local.set({ [containerId]: originalContent });
+        container.dataset.jiraDiffOriginal = originalContent;
 
-        const enhancedDiff = this.createEnhancedDiff(oldText, newText, largeChangeLimit);
+        const enhancedDiff = this.createEnhancedDiff(oldText, newText, settings.largeChangeLimit, settings);
 
         container.replaceChild(enhancedDiff, container.children[0]);
         if (container.children[1]) container.removeChild(container.children[1]);
@@ -161,18 +160,39 @@ const DiffHighlighter = {
     }
   },
 
+  getDiffValues(container) {
+    if (!(container instanceof HTMLElement)) return null;
+    if (this.isForbiddenContainer(container) || container.closest('.enhanced-diff')) return null;
+    if (container.children.length !== 3) return null;
+    if (container.querySelector('button, input, textarea, select, [contenteditable="true"]')) return null;
+
+    const [oldNode, separator, newNode] = container.children;
+    if (!(oldNode instanceof HTMLElement) || !(newNode instanceof HTMLElement)) return null;
+
+    // Jira renders old value / arrow / new value. The arrow may be an SVG or
+    // CSS icon with no text; a nonempty middle value must actually be an arrow.
+    const separatorText = separator.textContent?.trim() || '';
+    if (separatorText && !/^(?:→|➔|➜|⟶|⇒|->|=>)$/.test(separatorText)) return null;
+
+    const oldText = this.readFieldText(oldNode);
+    const newText = this.readFieldText(newNode);
+    // Empty values are valid when a field is populated or cleared.
+    if (!oldText && !newText) return null;
+    return { oldText, newText };
+  },
+
   findDiffContainers() {
     const LANG_MAP = {
-      en: { update: ['updated'],      desc: 'description' },
-      es: { update: ['actualizado'],  desc: 'descripción' },
-      de: { update: ['aktualisiert'], desc: 'beschreibung' },
-      fr: { update: ['mis à jour'],   desc: 'description' },
-      it: { update: ['aggiornato'],   desc: 'descrizione' },
-      pt: { update: ['atualizou'],    desc: 'descrição' },
-      ru: { update: ['обновил'],      desc: 'описание' },
-      ja: { update: ['更新'],         desc: '説明' },
-      zh: { update: ['更新'],         desc: '描述' },
-      nl: { update: ['bijgewerkt'],   desc: 'beschrijving' },
+      en: ['updated', 'changed', 'added', 'removed', 'cleared'],
+      es: ['actualizado'],
+      de: ['aktualisiert'],
+      fr: ['mis à jour'],
+      it: ['aggiornato'],
+      pt: ['atualizou'],
+      ru: ['обновил'],
+      ja: ['更新'],
+      zh: ['更新'],
+      nl: ['bijgewerkt'],
     };
 
     /* build flattened accent‑stripped keyword sets */
@@ -182,227 +202,387 @@ const DiffHighlighter = {
       .replace(/[\u0300-\u036f]/g, '')
       .trim();
 
-    const DESC_SET = new Set(Object.values(LANG_MAP).map(l => norm(l.desc)));
     const UPDATE_SET = new Set(
-      Object.values(LANG_MAP).flatMap(l => l.update.map(norm))
+      Object.values(LANG_MAP).flatMap(words => words.map(norm))
     );
+    const hasUpdate = text => [...UPDATE_SET].some(word => text.includes(word));
 
     const candidates = [];
-    const seen = new Set();
 
-    const allDivs = document.querySelectorAll('div');
+    for (const diff of document.querySelectorAll('div')) {
+      if (!this.getDiffValues(diff)) continue;
 
-    for (const el of allDivs) {
-      if (!(el instanceof HTMLElement)) continue;
-      if (this.isForbiddenContainer(el)) continue;
-      if (el.closest('.enhanced-diff')) continue;
+      // A value pair belongs to the activity header immediately before it.
+      // Its nested markup and field name do not matter. Never use an update
+      // elsewhere in the page or a neighboring history row as the header.
+      const header = diff.previousElementSibling;
+      if (!(header instanceof HTMLElement) || header.tagName !== 'DIV') continue;
+      if (!hasUpdate(norm(header.textContent))) continue;
 
-      const txt = norm(el.textContent);
-      if (!txt) continue;
-
-      const hasDesc = [...DESC_SET].some(word => txt.includes(word));
-      const hasUpdate = [...UPDATE_SET].some(word => txt.includes(word));
-
-      if (!hasDesc || !hasUpdate) continue;
-
-      // Look for the diff container near the anchor, not anywhere on the page
-      const nearby = [
-        el.nextElementSibling,
-        el.parentElement?.nextElementSibling,
-        el.closest('div')?.nextElementSibling,
-      ];
-
-      for (const diff of nearby) {
-        if (!(diff instanceof HTMLElement)) continue;
-        if (this.isForbiddenContainer(diff)) continue;
-        if (diff.closest('.enhanced-diff')) continue;
-        if (diff.children.length !== 3) continue;
-
-        const oldNode = diff.children[0];
-        const newNode = diff.children[2];
-
-        if (!(oldNode instanceof HTMLElement) || !(newNode instanceof HTMLElement)) {
-          continue;
-        }
-
-        const oldText = oldNode.textContent?.trim() || '';
-        const newText = newNode.textContent?.trim() || '';
-
-        if (!oldText || !newText) continue;
-
-        // Avoid obvious interactive/layout UI
-        if (diff.querySelector('button, input, textarea, select')) continue;
-
-        if (!seen.has(diff)) {
-          seen.add(diff);
-          candidates.push(diff);
-        }
-      }
+      candidates.push(diff);
     }
 
     return candidates;
   },
 
-  createEnhancedDiff(oldText, newText, largeChangeLimit = DEFAULT_LARGE_CHANGE_LIMIT) {
-    const diffContainer = document.createElement('div');
-    diffContainer.className = 'enhanced-diff';
+  readFieldText(node) {
+    // textContent loses line breaks in rendered rich-text fields.
+    const blocks = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'PRE', 'BLOCKQUOTE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
+    let text = '';
+    const visit = current => {
+      if (current.nodeType === Node.TEXT_NODE) {
+        text += current.textContent;
+        return;
+      }
+      if (current.nodeType !== Node.ELEMENT_NODE) return;
+      if (current.tagName === 'BR') {
+        text += '\n';
+        return;
+      }
+      const block = blocks.has(current.tagName);
+      if (block && text && !text.endsWith('\n')) text += '\n';
+      // Rendered headings in history represent source formatting. Show their
+      // Markdown markers as plain text rather than carrying heading styles over.
+      if (/^H[1-6]$/.test(current.tagName) && !/^\s*(?:#{1,6}\s|h[1-6]\.\s)/.test(current.textContent)) {
+        text += '#'.repeat(Number(current.tagName[1])) + ' ';
+      }
+      for (const child of current.childNodes) visit(child);
+      if (block && current.nextSibling && !text.endsWith('\n')) text += '\n';
+    };
+    for (const child of node.childNodes) visit(child);
+    return text;
+  },
 
-    let dmp;
+  createEnhancedDiff(oldText, newText, largeChangeLimit = DEFAULT_LARGE_CHANGE_LIMIT, settings = {}) {
+    if (normalizeDiffView(settings.diffView) === 'original') {
+      return this.createOriginalPreview(settings);
+    }
     try {
-      dmp = new diff_match_patch();
-    } catch (e) {
-      console.error('Failed to create diff_match_patch instance:', e);
+      return this.createGitDiff(oldText, newText, largeChangeLimit, settings);
+    } catch (error) {
+      console.error('Failed to compute line diff:', error);
       return this.fallbackDiffDisplay(oldText, newText);
     }
+  },
 
-    let diffs;
-    try {
-      diffs = dmp.diff_main(oldText, newText);
-      dmp.diff_cleanupSemantic(diffs);
-    } catch (e) {
-      console.error('Failed to compute diff:', e);
-      return this.fallbackDiffDisplay(oldText, newText);
-    }
-
-    if (!Array.isArray(diffs)) {
-      console.error('diff_main did not return an array');
-      return this.fallbackDiffDisplay(oldText, newText);
-    }
-
-    const oldContainer = document.createElement('div');
-    oldContainer.className = 'old-text';
-    
-    const newContainer = document.createElement('div');
-    newContainer.className = 'new-text';
-
-    let isBufferingLargeInsertion = false;
-    let largeInsertionTextBuffer = '';
-    let isBufferingLargeDeletion = false;
-    let largeDeletionTextBuffer = '';
-
-    const createLargeChangeToggle = (type, text) => {
-      const wrapper = document.createElement('div');
-      wrapper.className = `large-change-wrapper large-${type}-wrapper`;
-
-      const indicator = document.createElement('div');
-      indicator.className = `large-change-indicator large-${type}-indicator`;
-
-      const label = document.createElement('span');
-      label.textContent = `Large ${type} (${text.length} characters)`;
-
-      const toggleButton = document.createElement('button');
-      toggleButton.type = 'button';
-      toggleButton.className = 'large-change-toggle';
-      toggleButton.textContent = 'Show full text';
-      toggleButton.setAttribute('aria-expanded', 'false');
-
-      let fullTextElement = null;
-
-      toggleButton.addEventListener('click', () => {
-        const isExpanded = toggleButton.getAttribute('aria-expanded') === 'true';
-
-        if (isExpanded) {
-          fullTextElement?.remove();
-          fullTextElement = null;
-          toggleButton.textContent = 'Show full text';
-          toggleButton.setAttribute('aria-expanded', 'false');
-          return;
-        }
-
-        fullTextElement = document.createElement('div');
-        fullTextElement.className = `large-change-full-text large-${type}-full-text`;
-        fullTextElement.appendChild(this.createTextFragment(text));
-        wrapper.appendChild(fullTextElement);
-        toggleButton.textContent = 'Hide full text';
-        toggleButton.setAttribute('aria-expanded', 'true');
-      });
-
-      indicator.append(label, toggleButton);
-      wrapper.appendChild(indicator);
-
-      return wrapper;
-    };
-
-    const flushLargeInsertionBuffer = () => {
-      if (!isBufferingLargeInsertion) return;
-
-      newContainer.appendChild(createLargeChangeToggle('insertion', largeInsertionTextBuffer));
-
-      isBufferingLargeInsertion = false;
-      largeInsertionTextBuffer = '';
-    };
-
-    const flushLargeDeletionBuffer = () => {
-      if (!isBufferingLargeDeletion) return;
-
-      oldContainer.appendChild(createLargeChangeToggle('deletion', largeDeletionTextBuffer));
-
-      isBufferingLargeDeletion = false;
-      largeDeletionTextBuffer = '';
-    };
-
-    const flushLargeChangeBuffers = () => {
-      flushLargeInsertionBuffer();
-      flushLargeDeletionBuffer();
-    };
-
-    diffs.forEach((diffTuple) => {
-      const operation = diffTuple[0];
-      const diffText = diffTuple[1];
-
-      const formattedPlainText = this.formatTextPlain(diffText);
-
-      switch (operation) {
-        case 0: // DIFF_EQUAL
-          flushLargeChangeBuffers();
-          this.appendText(oldContainer, formattedPlainText);
-          this.appendText(newContainer, formattedPlainText);
-          break;
-
-        case -1: // DIFF_DELETE
-          flushLargeInsertionBuffer();
-          if (diffText.length > largeChangeLimit) {
-            isBufferingLargeDeletion = true;
-            largeDeletionTextBuffer += formattedPlainText;
-          } else {
-            flushLargeDeletionBuffer();
-            this.appendText(oldContainer, formattedPlainText, 'deleted');
-          }
-          break;
-
-        case 1: // DIFF_INSERT
-          flushLargeDeletionBuffer();
-          if (diffText.length > largeChangeLimit) {
-            isBufferingLargeInsertion = true;
-            largeInsertionTextBuffer += formattedPlainText;
-          } else {
-            flushLargeInsertionBuffer();
-            this.appendText(newContainer, formattedPlainText, 'inserted');
-
-            const placeholderSpan = document.createElement('span');
-            placeholderSpan.className = 'placeholder';
-            placeholderSpan.textContent = '\u00A0'.repeat(Math.min(diffText.length, 10));
-            oldContainer.appendChild(placeholderSpan);
-          }
-          break;
+  createOriginalPreview(settings) {
+    const container = document.createElement('div');
+    container.className = 'enhanced-diff original-diff';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'diff-toolbar';
+    const title = document.createElement('span');
+    title.textContent = 'Original values';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'diff-view-toggle';
+    toggle.textContent = 'Show Git diff';
+    toggle.setAttribute('aria-pressed', 'false');
+    toggle.addEventListener('click', () => {
+      const parentContainer = container.closest('div[id^="diff-container-"]');
+      if (parentContainer && parentContainer.dataset.jiraDiffOriginal) {
+        parentContainer.innerHTML = parentContainer.dataset.jiraDiffOriginal;
+        this.debouncedEnhanceDiff();
       }
     });
+    toolbar.append(title, toggle);
+    container.appendChild(toolbar);
+    return container;
+  },
 
-    // Handle any remaining large changes at the end
-    flushLargeChangeBuffers();
+  getLineDiff(oldText, newText) {
+    const dmp = new diff_match_patch();
+    const encoded = dmp.diff_linesToChars_(oldText.replace(/\r\n/g, '\n'), newText.replace(/\r\n/g, '\n'));
+    const diffs = dmp.diff_main(encoded.chars1, encoded.chars2, false);
+    dmp.diff_charsToLines_(diffs, encoded.lineArray);
+    // Keep line boundaries intact: character-level semantic cleanup would
+    // shift fragments between lines and corrupt the line numbers.
+    const rows = [];
+    let oldLine = 1;
+    let newLine = 1;
+    for (const diff of diffs) {
+      const operation = diff[0];
+      const text = diff[1];
+      const lines = text.match(/[^\n]*\n|[^\n]+$/g) || [];
+      for (const line of lines) {
+        rows.push({
+          operation,
+          text: line.endsWith('\n') ? line.slice(0, -1) : line,
+          hasNewline: line.endsWith('\n'),
+          oldBefore: oldLine - 1,
+          newBefore: newLine - 1,
+          oldLine: operation === 1 ? null : oldLine++,
+          newLine: operation === -1 ? null : newLine++,
+        });
+      }
+    }
+    return rows;
+  },
 
-    diffContainer.appendChild(oldContainer);
-    diffContainer.appendChild(newContainer);
-    
-    // Pane scroll sync
-    oldContainer.addEventListener('scroll', () => {
-      newContainer.scrollTop = oldContainer.scrollTop;
+  createGitDiff(oldText, newText, largeChangeLimit, settings) {
+    const container = document.createElement('div');
+    const view = normalizeDiffView(settings.diffView);
+    const split = view.startsWith('side-by-side');
+    container.className = `enhanced-diff unified-diff${split ? ' split-diff' : ''}`;
+    const rows = this.getLineDiff(oldText, newText);
+    const wordDiff = new diff_match_patch();
+    for (let start = 0; start < rows.length;) {
+      if (rows[start].operation === 0) { start++; continue; }
+      let end = start;
+      while (end < rows.length && rows[end].operation !== 0) end++;
+      const removed = rows.slice(start, end).filter(row => row.operation === -1);
+      const added = rows.slice(start, end).filter(row => row.operation === 1);
+      for (let i = 0; i < Math.min(removed.length, added.length); i++) {
+        if (removed[i].text.length + added[i].text.length > 10000) continue;
+        const fragments = wordDiff.diff_main(removed[i].text, added[i].text);
+        wordDiff.diff_cleanupSemantic(fragments);
+        removed[i].fragments = fragments.filter(fragment => fragment[0] !== 1);
+        added[i].fragments = fragments.filter(fragment => fragment[0] !== -1);
+      }
+      start = end;
+    }
+    const contextLines = normalizeContextLines(settings.contextLines);
+    let showAll = view === 'full' || view === 'side-by-side';
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'diff-toolbar';
+    const title = document.createElement('span');
+    title.textContent = 'Before → After';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'diff-view-toggle';
+    toolbar.append(title, toggle);
+    const body = document.createElement('div');
+    body.className = 'diff-lines';
+    container.appendChild(toolbar);
+    if (split) {
+      const headings = document.createElement('div');
+      headings.className = 'diff-pane-headings';
+      for (const label of ['Before', 'After']) {
+        const heading = document.createElement('span');
+        heading.textContent = label;
+        headings.appendChild(heading);
+      }
+      container.appendChild(headings);
+    }
+    container.appendChild(body);
+
+    const appendRow = (parent, row) => {
+      const line = document.createElement('div');
+      line.className = `diff-line diff-${row.operation === 1 ? 'added' : row.operation === -1 ? 'removed' : 'context'}`;
+      for (const [className, text] of [
+        ['diff-old-number', row.oldLine ?? ''],
+        ['diff-new-number', row.newLine ?? ''],
+        ['diff-sign', row.operation === 1 ? '+' : row.operation === -1 ? '−' : ' '],
+        ['diff-line-text', row.text || '\u200b'],
+      ]) {
+        const cell = document.createElement('span');
+        cell.className = className;
+        if (className === 'diff-line-text' && row.fragments) {
+          for (const diff of row.fragments) {
+            const operation = diff[0];
+            const fragment = diff[1];
+            const span = document.createElement('span');
+            if (operation !== 0) span.className = operation === 1 ? 'diff-word-added' : 'diff-word-removed';
+            span.textContent = fragment;
+            cell.appendChild(span);
+          }
+          if (!row.text) cell.textContent = '\u200b';
+        } else {
+          cell.textContent = text;
+        }
+        line.appendChild(cell);
+      }
+      parent.appendChild(line);
+      if (!row.hasNewline && row.operation !== 0) {
+        const marker = document.createElement('div');
+        marker.className = 'diff-newline-marker';
+        marker.textContent = '\\ No newline at end of field';
+        parent.appendChild(marker);
+      }
+    };
+
+    const appendUnifiedRows = (parent, visibleRows) => {
+      for (let i = 0; i < visibleRows.length;) {
+        const row = visibleRows[i];
+        let end = i + 1;
+        if (row.operation !== 0) {
+          while (end < visibleRows.length && visibleRows[end].operation === row.operation) end++;
+        }
+        const group = visibleRows.slice(i, end);
+        const length = group.reduce((sum, item) => sum + item.text.length + Number(item.hasNewline), 0);
+        if (row.operation !== 0 && length > largeChangeLimit) {
+          const wrapper = document.createElement('div');
+          const type = row.operation === 1 ? 'insertion' : 'deletion';
+          wrapper.className = `large-change-wrapper large-${type}-wrapper`;
+          const indicator = document.createElement('div');
+          indicator.className = `large-change-indicator large-${type}-indicator`;
+          const label = document.createElement('span');
+          label.textContent = `Large ${type} (${length} characters, ${group.length} lines)`;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'large-change-toggle';
+          button.textContent = 'Show full text';
+          button.setAttribute('aria-expanded', 'false');
+          button.addEventListener('click', () => {
+            const expanded = button.getAttribute('aria-expanded') === 'true';
+            button.setAttribute('aria-expanded', String(!expanded));
+            button.textContent = expanded ? 'Show full text' : 'Hide full text';
+            wrapper.querySelector('.large-change-full-text')?.remove();
+            if (!expanded) {
+              const fullText = document.createElement('div');
+              fullText.className = 'large-change-full-text';
+              group.forEach(item => appendRow(fullText, item));
+              wrapper.appendChild(fullText);
+            }
+          });
+          indicator.append(label, button);
+          wrapper.appendChild(indicator);
+          parent.appendChild(wrapper);
+        } else {
+          group.forEach(item => appendRow(parent, item));
+        }
+        i = end;
+      }
+    };
+
+    const appendPair = (parent, before, after) => {
+      const pair = document.createElement('div');
+      pair.className = 'diff-split-row';
+      for (const [side, row] of [['before', before], ['after', after]]) {
+        const pane = document.createElement('div');
+        pane.className = `diff-${side}${row ? '' : ' diff-empty-side'}`;
+        if (row) appendRow(pane, row);
+        pair.appendChild(pane);
+      }
+      parent.appendChild(pair);
+    };
+
+    const appendSplitRows = (parent, visibleRows) => {
+      for (let i = 0; i < visibleRows.length;) {
+        if (visibleRows[i].operation === 0) {
+          appendPair(parent, visibleRows[i], visibleRows[i]);
+          i++;
+          continue;
+        }
+        let end = i;
+        while (end < visibleRows.length && visibleRows[end].operation !== 0) end++;
+        const before = visibleRows.slice(i, end).filter(row => row.operation === -1);
+        const after = visibleRows.slice(i, end).filter(row => row.operation === 1);
+        const lineCount = Math.max(before.length, after.length);
+        const lengthOf = lines => lines.reduce((sum, row) => sum + row.text.length + Number(row.hasNewline), 0);
+        const beforeLength = lengthOf(before);
+        const afterLength = lengthOf(after);
+        const appendPairs = target => {
+          for (let index = 0; index < lineCount; index++) appendPair(target, before[index], after[index]);
+        };
+        if (Math.max(beforeLength, afterLength) > largeChangeLimit) {
+          const type = before.length === 0 ? 'insertion' : after.length === 0 ? 'deletion' : 'change';
+          const wrapper = document.createElement('div');
+          wrapper.className = `large-change-wrapper large-${type}-wrapper`;
+          const indicator = document.createElement('div');
+          indicator.className = `large-change-indicator large-${type}-indicator`;
+          const label = document.createElement('span');
+          label.textContent = `Large ${type} (${beforeLength + afterLength} characters, ${lineCount} lines)`;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'large-change-toggle';
+          button.textContent = 'Show full text';
+          button.setAttribute('aria-expanded', 'false');
+          button.addEventListener('click', () => {
+            const expanded = button.getAttribute('aria-expanded') === 'true';
+            button.setAttribute('aria-expanded', String(!expanded));
+            button.textContent = expanded ? 'Show full text' : 'Hide full text';
+            wrapper.querySelector('.large-change-full-text')?.remove();
+            if (!expanded) {
+              const fullText = document.createElement('div');
+              fullText.className = 'large-change-full-text';
+              appendPairs(fullText);
+              wrapper.appendChild(fullText);
+            }
+          });
+          indicator.append(label, button);
+          wrapper.appendChild(indicator);
+          parent.appendChild(wrapper);
+        } else {
+          appendPairs(parent);
+        }
+        i = end;
+      }
+    };
+    const appendRows = (parent, visibleRows) => {
+      if (split) appendSplitRows(parent, visibleRows);
+      else appendUnifiedRows(parent, visibleRows);
+    };
+
+    const render = () => {
+      body.replaceChildren();
+      toggle.textContent = showAll ? 'Show changed lines' : 'Show all lines';
+      toggle.setAttribute('aria-pressed', String(showAll));
+      const ranges = [];
+      if (showAll && rows.length) ranges.push([0, rows.length]);
+      else rows.forEach((row, index) => {
+        if (row.operation === 0) return;
+        const start = Math.max(0, index - contextLines);
+        const end = Math.min(rows.length, index + contextLines + 1);
+        const previous = ranges[ranges.length - 1];
+        if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+        else ranges.push([start, end]);
+      });
+
+      const appendGap = (start, end) => {
+        if (start === end) return;
+        const gap = document.createElement('div');
+        gap.className = 'diff-gap';
+        const button = document.createElement('button');
+        button.type = 'button';
+        const gapLabel = `${end - start} unchanged ${end - start === 1 ? 'line' : 'lines'}`;
+        button.textContent = `Show ${gapLabel}`;
+        button.setAttribute('aria-expanded', 'false');
+        button.addEventListener('click', () => {
+          const expanded = button.getAttribute('aria-expanded') === 'true';
+          button.setAttribute('aria-expanded', String(!expanded));
+          button.textContent = `${expanded ? 'Show' : 'Hide'} ${gapLabel}`;
+          gap.querySelector('.diff-gap-lines')?.remove();
+          if (!expanded) {
+            const lines = document.createElement('div');
+            lines.className = 'diff-gap-lines';
+            appendRows(lines, rows.slice(start, end));
+            gap.appendChild(lines);
+          }
+        });
+        gap.appendChild(button);
+        body.appendChild(gap);
+      };
+
+      if (!ranges.length) {
+        const empty = document.createElement('div');
+        empty.className = 'diff-empty';
+        empty.textContent = 'No textual changes.';
+        body.appendChild(empty);
+        appendGap(0, rows.length);
+        return;
+      }
+      let cursor = 0;
+      for (const [start, end] of ranges) {
+        appendGap(cursor, start);
+        const visibleRows = rows.slice(start, end);
+        const oldCount = visibleRows.filter(row => row.oldLine !== null).length;
+        const newCount = visibleRows.filter(row => row.newLine !== null).length;
+        const header = document.createElement('div');
+        header.className = 'diff-hunk-header';
+        header.textContent = `@@ -${rows[start].oldBefore + Number(oldCount > 0)},${oldCount} +${rows[start].newBefore + Number(newCount > 0)},${newCount} @@`;
+        body.appendChild(header);
+        appendRows(body, visibleRows);
+        cursor = end;
+      }
+      appendGap(cursor, rows.length);
+    };
+    toggle.addEventListener('click', () => {
+      showAll = !showAll;
+      render();
     });
-    newContainer.addEventListener('scroll', () => {
-      oldContainer.scrollTop = newContainer.scrollTop;
-    });
-
-    return diffContainer;
+    render();
+    return container;
   },
 
   fallbackDiffDisplay(oldText, newText) {
@@ -423,44 +603,20 @@ const DiffHighlighter = {
     return diffContainer;
   },
 
-formatTextPlain(text) {
-  return String(text ?? '')
-    .replace(/\*/g, '•')
-    .split('\n')
-    .map((line) => line.trim())
-    .join('\n');
-},
+  createTextFragment(text) {
+    // Convert raw text into a DocumentFragment with <br> elements for newlines.
+    const textFragment = document.createDocumentFragment();
+    const lines = String(text ?? '').split('\n');
 
-createTextFragment(text) {
-  // convert plain text into a DocumentFragment with <br> elements for newlines
-  const textFragment = document.createDocumentFragment();
-  const lines = this.formatTextPlain(text).split('\n');
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-    textFragment.appendChild(document.createTextNode(lines[lineIndex]));
-    if (lineIndex < lines.length - 1) {
-      textFragment.appendChild(document.createElement('br'));
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      textFragment.appendChild(document.createTextNode(lines[lineIndex]));
+      if (lineIndex < lines.length - 1) {
+        textFragment.appendChild(document.createElement('br'));
+      }
     }
-  }
 
-  return textFragment;
-},
-
-appendText(parentElement, text, wrapperClassName = null) {
-  if (!parentElement) return;
-
-  const contentFragment = this.createTextFragment(text);
-
-  if (wrapperClassName) {
-    const wrapperSpan = document.createElement('span');
-    wrapperSpan.className = wrapperClassName;
-    wrapperSpan.appendChild(contentFragment);
-    parentElement.appendChild(wrapperSpan);
-    return;
-  }
-
-  parentElement.appendChild(contentFragment);
-},
+    return textFragment;
+  },
 
   setupObserver() {
     if (window.diffObserver) return;
@@ -472,7 +628,7 @@ appendText(parentElement, text, wrapperClassName = null) {
     window.diffObserver = new MutationObserver(muts => {
       const relevant = muts.some(m =>
         (m.addedNodes.length || m.removedNodes.length || m.type === 'characterData') &&
-        !m.target.closest('.enhanced-diff')
+        !(m.target instanceof Element ? m.target : m.target.parentElement)?.closest('.enhanced-diff')
       );
       if (relevant) triggerEnhance();
     });
@@ -491,8 +647,6 @@ appendText(parentElement, text, wrapperClassName = null) {
         );
         if (!btn) return;
 
-        console.log('[DH] activity button clicked:', btn.dataset.testid);
-
         setTimeout(triggerEnhance, 200);
       },
       true
@@ -502,18 +656,11 @@ appendText(parentElement, text, wrapperClassName = null) {
   async removeEnhancements() {
     try {
       if (!isExtensionValid()) return;
-      const enhancedDiffs = document.querySelectorAll('.enhanced-diff');
-      for (const enhancedDiff of enhancedDiffs) {
+      for (const enhancedDiff of document.querySelectorAll('.enhanced-diff')) {
         const parentContainer = enhancedDiff.closest('div[id^="diff-container-"]');
-        if (parentContainer) {
-          const containerId = parentContainer.id;
-          const result = await chrome.storage.local.get(containerId);
-          if (result[containerId]) {
-            parentContainer.innerHTML = result[containerId];
-            await chrome.storage.local.remove(containerId);
-          } else {
-            enhancedDiff.remove();
-          }
+        if (parentContainer?.dataset.jiraDiffOriginal) {
+          parentContainer.innerHTML = parentContainer.dataset.jiraDiffOriginal;
+          delete parentContainer.dataset.jiraDiffOriginal;
         } else {
           enhancedDiff.remove();
         }
@@ -539,6 +686,7 @@ const MessageHandler = {
           await DiffHighlighter.removeEnhancements();
           if (window.diffObserver) {
             window.diffObserver.disconnect();
+            window.diffObserver = null;
           }
         }
         sendResponse({status: "success"});
@@ -552,6 +700,7 @@ const MessageHandler = {
           await DiffHighlighter.removeEnhancements();
           if (window.diffObserver) {
             window.diffObserver.disconnect();
+            window.diffObserver = null;
           }
         }
         sendResponse({status: "success"});

@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>Jira Diff Highlighter</title>
   <style>
     body {
@@ -111,6 +112,14 @@
       border-radius: 6px;
       font-family: inherit;
     }
+    .diff-settings select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #fff;
+      font-family: inherit;
+    }
     .diff-limit-entry span {
       color: #333;
       font-size: 13px;
@@ -200,6 +209,25 @@
       <span class="slider"></span>
     </label>
     <span class="toggle-label">Enable diff highlighting</span>
+  </div>
+  <div class="diff-settings">
+    <label for="diffView">Diff preview</label>
+    <select id="diffView">
+      <option value="original">Original Jira values</option>
+      <option value="side-by-side-changes">Git side-by-side - changed lines</option>
+      <option value="side-by-side">Git side-by-side - all lines</option>
+      <option value="changes">Git unified - changed lines</option>
+      <option value="full">Git unified - all lines</option>
+    </select>
+    <div class="hint">Compare aligned before/after lines or a unified diff. Raw formatting markers are preserved.</div>
+  </div>
+  <div class="diff-settings" id="contextLinesSetting">
+    <label for="contextLines">Context around changes</label>
+    <div class="diff-limit-entry">
+      <input id="contextLines" type="number" min="0" max="20" step="1">
+      <span>unchanged lines</span>
+    </div>
+    <div class="hint">Use 0 to show only changed lines (the default). Add context to show nearby unchanged lines.</div>
   </div>
   <div class="diff-settings">
     <label for="largeChangeLimit">Large change limit</label>

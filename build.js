@@ -16,10 +16,9 @@ fs.rmSync(outDir, { recursive: true, force: true });   // clean slate
 fs.mkdirSync(outDir, { recursive: true });
 
 /**
- * Recursively copy "src" → "dst", skipping dist/ itself.
+ * Recursively copy an extension asset directory.
  */
 function copyRecursive(src, dst) {
-  if (src.startsWith('dist')) return;               // skip build output
   const stat = fs.statSync(src);
 
   if (stat.isDirectory()) {
@@ -31,7 +30,10 @@ function copyRecursive(src, dst) {
     fs.copyFileSync(src, dst);
   }
 }
-copyRecursive('.', outDir);                         // copy project root
+// Package runtime assets only, excluding dependencies, tests and local files.
+for (const entry of ['background.js', 'content', 'icons', 'lib', 'popup', 'LICENSE']) {
+  copyRecursive(entry, path.join(outDir, entry));
+}
 
 // 3. overwrite the manifest we just copied -----------------------------------
 fs.writeFileSync(

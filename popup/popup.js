@@ -12,6 +12,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const els = {
     toggle: document.getElementById('extensionToggle'),
     largeChangeLimit: document.getElementById('largeChangeLimit'),
+    diffView: document.getElementById('diffView'),
+    contextLines: document.getElementById('contextLines'),
+    contextLinesSetting: document.getElementById('contextLinesSetting'),
     domainInput: document.getElementById('allowedDomains'),
     addDomain: document.getElementById('addDomain'),
     domainList: document.getElementById('domainList'),
@@ -34,6 +37,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const parsed = Number.parseInt(value, 10);
     if (!Number.isFinite(parsed)) return DEFAULT_LARGE_CHANGE_LIMIT;
     return Math.min(Math.max(parsed, MIN_LARGE_CHANGE_LIMIT), MAX_LARGE_CHANGE_LIMIT);
+  };
+  const normalizeDiffView = value => ['original', 'changes', 'full', 'side-by-side', 'side-by-side-changes'].includes(value) ? value : 'side-by-side-changes';
+  const normalizeContextLines = value => {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 20) : 0;
+  };
+  const updateContextSetting = () => {
+    els.contextLinesSetting.hidden = !['changes', 'side-by-side-changes'].includes(els.diffView.value);
   };
 
   const domainToOrigins = domain => {
@@ -191,7 +202,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const data = await storageGet([
       'extensionEnabled',
       'allowedDomains',
-      'largeChangeLimit'
+      'largeChangeLimit',
+      'diffView',
+      'contextLines'
     ]);
     const configuredDomains = Array.isArray(data.allowedDomains)
       ? data.allowedDomains
@@ -201,6 +214,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     els.toggle.checked = data.extensionEnabled !== false;
     els.largeChangeLimit.value = largeChangeLimit;
+    els.diffView.value = normalizeDiffView(data.diffView);
+    els.contextLines.value = normalizeContextLines(data.contextLines);
+    updateContextSetting();
     state.domains = [...new Set([...configuredDomains, ...grantedDomains])];
     renderDomains();
 
@@ -220,6 +236,20 @@ document.addEventListener('DOMContentLoaded', () => {
     els.largeChangeLimit.value = largeChangeLimit;
     await storageSet({ largeChangeLimit });
     setStatus('Large change limit saved.', 'success');
+    applyToCurrentTab(state.domains);
+  });
+  els.diffView.addEventListener('change', async () => {
+    const diffView = normalizeDiffView(els.diffView.value);
+    updateContextSetting();
+    await storageSet({ diffView });
+    setStatus('Diff preview saved.', 'success');
+    applyToCurrentTab(state.domains);
+  });
+  els.contextLines.addEventListener('change', async () => {
+    const contextLines = normalizeContextLines(els.contextLines.value);
+    els.contextLines.value = contextLines;
+    await storageSet({ contextLines });
+    setStatus('Context lines saved.', 'success');
     applyToCurrentTab(state.domains);
   });
   els.addDomain.addEventListener('click', addDomain);

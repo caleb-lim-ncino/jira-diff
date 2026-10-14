@@ -40,27 +40,6 @@
   overflow: auto;
 }
 
-.deleted {
-    background-color: #ffd7d7;
-    text-decoration: line-through;
-    color: #b30000;
-}
-
-.inserted {
-    background-color: #a3ffb3;
-    color: #006400;
-    font-weight: bold;
-    border: 1px solid #00a000;
-    border-radius: 2px;
-    padding: 0 2px;
-    margin: 0 1px;
-}
-
-.placeholder {
-    display: inline-block;
-    border-bottom: 1px dashed #ccc;
-}
-
 .large-change-wrapper {
     margin: 5px 0;
 }
@@ -119,3 +98,136 @@
     color: #b30000;
     text-decoration: line-through;
 }
+
+.enhanced-diff.unified-diff {
+    display: block;
+    border: 1px solid #c1c7d0;
+    border-radius: 6px;
+    overflow: hidden;
+    color: #172b4d;
+    background: #fff;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+}
+
+.unified-diff .diff-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #c1c7d0;
+    background: #f4f5f7;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+}
+
+.enhanced-diff.original-diff {
+    display: block;
+    color: #172b4d;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+}
+
+.enhanced-diff.original-diff .diff-toolbar {
+    background: #f4f5f7;
+    border: 1px solid #c1c7d0;
+    border-radius: 6px;
+    color: #172b4d;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+}
+
+.unified-diff .diff-view-toggle,
+.unified-diff .diff-gap button {
+    border: 1px solid #a5adba;
+    border-radius: 4px;
+    padding: 4px 8px;
+    background: #fff;
+    color: #0747a6;
+    cursor: pointer;
+    font: inherit;
+}
+
+.unified-diff button:focus-visible {
+    outline: 2px solid #0052cc;
+    outline-offset: 2px;
+}
+
+.unified-diff .diff-lines {
+    max-height: 600px;
+    overflow: auto;
+}
+
+.unified-diff .diff-line {
+    display: grid;
+    grid-template-columns: minmax(3em, max-content) minmax(3em, max-content) 2em minmax(0, 1fr);
+    line-height: 1.6;
+}
+
+.unified-diff .diff-old-number,
+.unified-diff .diff-new-number {
+    text-align: right;
+    padding: 0 6px;
+    color: #5e6c84;
+    border-right: 1px solid #dfe1e6;
+    user-select: none;
+}
+
+.unified-diff .diff-sign {
+    text-align: center;
+    user-select: none;
+}
+
+.unified-diff .diff-line-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding-right: 8px;
+    tab-size: 4;
+}
+
+.unified-diff .diff-added { background: #e6ffed; }
+.unified-diff .diff-removed { background: #ffeef0; }
+.unified-diff .diff-added .diff-sign { color: #006400; }
+.unified-diff .diff-removed .diff-sign { color: #b30000; }
+.unified-diff .diff-word-added { background: #acf2bd; }
+.unified-diff .diff-word-removed { background: #fdb8c0; }
+
+.unified-diff .diff-hunk-header,
+.unified-diff .diff-gap,
+.unified-diff .diff-empty {
+    background: #f1f8ff;
+    padding: 6px 10px;
+    color: #42526e;
+}
+
+.unified-diff .diff-hunk-header { border-block: 1px solid #dfe1e6; }
+.unified-diff .diff-newline-marker { padding: 0 10px 0 8em; color: #5e6c84; font-style: italic; }
+.unified-diff .diff-gap-lines { margin: 6px -10px -6px; background: #fff; }
+.unified-diff .large-change-wrapper { margin: 0; }
+.unified-diff .large-change-indicator { margin: 0; border-radius: 0; }
+.unified-diff .large-change-full-text { padding: 0; margin: 0; }
+
+.split-diff .diff-pane-headings,
+.split-diff .diff-split-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.split-diff .diff-pane-headings {
+    background: #f4f5f7;
+    border-bottom: 1px solid #c1c7d0;
+    font-family: Arial, sans-serif;
+    font-weight: bold;
+}
+
+.split-diff .diff-pane-headings span { padding: 6px 10px; }
+.split-diff .diff-pane-headings span:first-child,
+.split-diff .diff-before { border-right: 1px solid #c1c7d0; }
+.split-diff .diff-before,
+.split-diff .diff-after { display: flex; flex-direction: column; min-width: 0; }
+.split-diff .diff-line { grid-template-columns: minmax(3em, max-content) 1.5em minmax(0, 1fr); flex: 1; }
+.split-diff .diff-before .diff-new-number,
+.split-diff .diff-after .diff-old-number { display: none; }
+.split-diff .diff-empty-side { background: #f4f5f7; }
+.split-diff .diff-newline-marker { padding-left: 4.5em; background: #fafbfc; }

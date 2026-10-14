@@ -1,22 +1,20 @@
 {
   "name": "jira-diff-highlighter",
-  "version": "2.0",
+  "version": "2.1",
   "description": "Improves readability of Jira ticket diffs.",
   "author": "https://github.com/richiehowelll",
   "private": true,
-
   "scripts": {
-    "dev:chrome":   "node build.js chrome  && web-ext run -s dist/chrome  --target=chromium",
-    "dev:firefox":  "node build.js firefox && web-ext run -s dist/firefox",
-
-    "build:chrome":  "node build.js chrome  && cross-zip dist/chrome  jira-diff-highlighter.zip",
+    "test": "node --test",
+    "dev:chrome": "node build.js chrome  && web-ext run -s dist/chrome  --target=chromium",
+    "dev:firefox": "node build.js firefox && web-ext run -s dist/firefox",
+    "build:chrome": "node build.js chrome && web-ext build -s dist/chrome --artifacts-dir . --filename jira-diff-highlighter.zip --overwrite-dest",
     "build:firefox": "node build.js firefox && web-ext build     -s dist/firefox --overwrite-dest",
-
     "build": "npm run build:chrome && npm run build:firefox"
   },
-
   "devDependencies": {
-    "cross-zip-cli": "^3.3.0",
+    "cross-zip-cli": "^1.0.0",
+    "jsdom": "^30.1.1",
     "web-ext": "^7.6.0"
   }
 }
