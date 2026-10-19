@@ -28,7 +28,8 @@ async function setup(t, html) {
     storage: { sync: storage(settings), local: storage(originals) },
   };
   dom.window.eval(diffSource);
-  dom.window.eval(`${source}\nwindow.highlighter = DiffHighlighter;`);
+  dom.window.eval(source);
+  dom.window.highlighter = dom.window.__jiraDiffContentScript.highlighter;
   // Let initialization finish with the extension disabled, then run it explicitly.
   await new Promise(resolve => setImmediate(resolve));
   settings.extensionEnabled = true;
@@ -45,6 +46,14 @@ function row(field, oldValue = 'Before', newValue = 'After', update = 'updated')
   return `<section class="history-row"><div><span>Alice ${update} the </span><strong>${field}</strong></div>
     <div class="values"><div>${oldValue}</div><span>→</span><div>${newValue}</div></div></section>`;
 }
+
+test('blank and null saved domains do not throw during page initialization', async t => {
+  const { highlighter, settings } = await setup(t, '');
+  for (const allowedDomains of [[null, '', ' ', 123, 'atlassian.net'], ',atlassian.net,\n', [null, '', ' ']]) {
+    settings.allowedDomains = allowedDomains;
+    assert.equal(await highlighter.isAllowedJiraPage(), true);
+  }
+});
 
 test('enhances every field independently without needing a Description entry', async t => {
   const fields = ['Acceptance Criteria', 'Product Copy', 'Custom field 12345', 'Priority', 'Description'];
@@ -202,6 +211,8 @@ test('zero context shows only changes in separate hunks and highlights changed w
   assert.equal(document.querySelector('.diff-word-added').textContent, 'blue');
 });
 
+
+
 test('line diff preserves whitespace, blank lines, repeated lines and final newline changes', async t => {
   const { highlighter } = await setup(t, '');
   const pairs = [
@@ -309,7 +320,7 @@ test('original preview restores Jira markup and allows an inline Git preview', a
   const container = document.querySelector('.values');
   const enhanced = highlighter.createEnhancedDiff('Before', 'After', 500, settings);
   assert.ok(enhanced.classList.contains('original-diff'));
-  assert.equal(enhanced.querySelector('.diff-toolbar span').textContent, 'Original values');
+  assert.equal(enhanced.querySelector('.diff-toolbar-title').textContent, 'Original values');
   assert.equal(enhanced.querySelector('img'), null);
   container.replaceChild(enhanced, container.children[0]);
   while (container.children.length > 1) container.removeChild(container.lastChild);

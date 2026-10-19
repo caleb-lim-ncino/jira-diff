@@ -12,7 +12,7 @@ const normalizeDomainPattern = domain => {
   return normalized || null;
 };
 
-const isValidDomainPattern = domain => /^[a-z0-9.-]+$/.test(domain) && !domain.includes('..');
+const isValidDomainPattern = domain => typeof domain === 'string' && /^[a-z0-9.-]+$/.test(domain) && !domain.includes('..');
 
 const parseDomainPatterns = raw => {
   const values = Array.isArray(raw) ? raw : String(raw || '').split(/[\n,]+/);
@@ -81,7 +81,11 @@ chrome.runtime.onInstalled.addListener(async () => {
     return;
   }
 
-  await syncCustomDomainContentScript();
+  try {
+    await syncCustomDomainContentScript();
+  } catch (err) {
+    console.error('Failed to register custom Jira domain content scripts:', err);
+  }
 
   for (const cs of chrome.runtime.getManifest().content_scripts) {
     const tabs = await chrome.tabs.query({ url: cs.matches });
@@ -90,6 +94,12 @@ chrome.runtime.onInstalled.addListener(async () => {
       if (/^(chrome|chrome-extension):\/\//i.test(tab.url)) continue;
 
       try {
+        if (cs.css?.length) {
+          await chrome.scripting.insertCSS({
+            files: cs.css,
+            target: { tabId: tab.id, allFrames: cs.all_frames }
+          });
+        }
         await chrome.scripting.executeScript({
           files: cs.js,
           target: { tabId: tab.id, allFrames: cs.all_frames },

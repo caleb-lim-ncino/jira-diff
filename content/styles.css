@@ -1,3 +1,85 @@
+.jira-activity-toolbar {
+  display: inline-flex !important;
+  align-items: center;
+  flex-wrap: wrap;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 2px;
+  gap: 4px;
+  border: 1px solid var(--ds-border, #dcdfe4);
+  border-radius: 6px;
+  background: var(--ds-surface, #fff);
+}
+
+.jira-activity-native-filter {
+  display: none !important;
+}
+
+.jira-activity-shortcuts {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.jira-activity-shortcuts button,
+.jira-activity-toolbar .jira-activity-more {
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  color: var(--ds-text-subtle, #44546f);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 12px;
+  min-height: 26px;
+  height: 26px;
+  white-space: nowrap;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.jira-activity-shortcuts button:hover,
+.jira-activity-toolbar .jira-activity-more:hover {
+  background: var(--ds-background-neutral-hovered, #f1f2f4);
+}
+
+.jira-activity-shortcuts button[aria-pressed="true"] {
+  color: var(--ds-text-selected, #0c66e4);
+  background: var(--ds-background-selected, #e9f2ff);
+  border-color: var(--ds-border-selected, #0c66e4);
+}
+
+.jira-activity-shortcuts button:focus-visible,
+.jira-activity-toolbar .jira-activity-more:focus-visible {
+  outline: 2px solid var(--ds-border-focused, #388bff);
+  outline-offset: 2px;
+}
+
+.jira-activity-switching-menu {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.jira-activity-shortcuts button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.jira-activity-status {
+  font-size: 12px;
+  color: var(--ds-text-subtle, #44546f);
+  max-width: 280px;
+}
+
+.jira-activity-status:empty {
+  display: none;
+}
+
 .enhanced-diff {
   display: flex;
   width: 100%;
@@ -129,6 +211,10 @@
     font-size: 13px;
 }
 
+.enhanced-diff.original-diff .diff-toolbar-title {
+  font-weight: 500;
+}
+
 .enhanced-diff.original-diff .diff-toolbar {
     background: #f4f5f7;
     border: 1px solid #c1c7d0;
@@ -231,3 +317,4 @@
 .split-diff .diff-after .diff-old-number { display: none; }
 .split-diff .diff-empty-side { background: #f4f5f7; }
 .split-diff .diff-newline-marker { padding-left: 4.5em; background: #fafbfc; }
+

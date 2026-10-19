@@ -15,6 +15,8 @@ document.addEventListener('DOMContentLoaded', () => {
     diffView: document.getElementById('diffView'),
     contextLines: document.getElementById('contextLines'),
     contextLinesSetting: document.getElementById('contextLinesSetting'),
+    activityTabsEnabled: document.getElementById('activityTabsEnabled'),
+    defaultActivityFilter: document.getElementById('defaultActivityFilter'),
     domainInput: document.getElementById('allowedDomains'),
     addDomain: document.getElementById('addDomain'),
     domainList: document.getElementById('domainList'),
@@ -26,7 +28,8 @@ document.addEventListener('DOMContentLoaded', () => {
     domains: []
   };
 
-  const normalizeDomains = value => [...new Set(String(value || '')
+  const normalizeDomains = value => [...new Set(String((Array.isArray(value)
+    ? value.filter(domain => typeof domain === 'string') : value) || '')
     .split(/[\n,]+/)
     .map(domain => domain.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/^\*\./, '').toLowerCase())
     .filter(domain => /^[a-z0-9.-]+$/.test(domain) && !domain.includes('..')))];
@@ -46,6 +49,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const updateContextSetting = () => {
     els.contextLinesSetting.hidden = !['changes', 'side-by-side-changes'].includes(els.diffView.value);
   };
+  const normalizeActivityFilter = value => ['All', 'Comments', 'History', 'Jira default'].includes(value) ? value : 'All';
 
   const domainToOrigins = domain => {
     // Request the bare domain and its subdomains without requiring broad install-time access.
@@ -204,11 +208,11 @@ document.addEventListener('DOMContentLoaded', () => {
       'allowedDomains',
       'largeChangeLimit',
       'diffView',
-      'contextLines'
+      'contextLines',
+      'activityTabsEnabled',
+      'defaultActivityFilter'
     ]);
-    const configuredDomains = Array.isArray(data.allowedDomains)
-      ? data.allowedDomains
-      : normalizeDomains(data.allowedDomains);
+    const configuredDomains = normalizeDomains(data.allowedDomains);
     const grantedDomains = await permissionDomains();
     const largeChangeLimit = normalizeLargeChangeLimit(data.largeChangeLimit);
 
@@ -217,6 +221,9 @@ document.addEventListener('DOMContentLoaded', () => {
     els.diffView.value = normalizeDiffView(data.diffView);
     els.contextLines.value = normalizeContextLines(data.contextLines);
     updateContextSetting();
+    els.activityTabsEnabled.checked = data.activityTabsEnabled !== false;
+    els.defaultActivityFilter.value = normalizeActivityFilter(data.defaultActivityFilter);
+    els.defaultActivityFilter.disabled = !els.activityTabsEnabled.checked;
     state.domains = [...new Set([...configuredDomains, ...grantedDomains])];
     renderDomains();
 
@@ -250,6 +257,18 @@ document.addEventListener('DOMContentLoaded', () => {
     els.contextLines.value = contextLines;
     await storageSet({ contextLines });
     setStatus('Context lines saved.', 'success');
+    applyToCurrentTab(state.domains);
+  });
+  els.activityTabsEnabled.addEventListener('change', async () => {
+    const activityTabsEnabled = els.activityTabsEnabled.checked;
+    els.defaultActivityFilter.disabled = !activityTabsEnabled;
+    await storageSet({ activityTabsEnabled });
+    setStatus('Activity controls saved.', 'success');
+    applyToCurrentTab(state.domains);
+  });
+  els.defaultActivityFilter.addEventListener('change', async () => {
+    await storageSet({ defaultActivityFilter: normalizeActivityFilter(els.defaultActivityFilter.value) });
+    setStatus('Default activity filter saved.', 'success');
     applyToCurrentTab(state.domains);
   });
   els.addDomain.addEventListener('click', addDomain);

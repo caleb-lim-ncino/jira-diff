@@ -238,6 +238,20 @@
     <div class="hint">Insertions or deletions longer than this are collapsed into large-change blocks.</div>
   </div>
   <div class="domain-settings">
+    <label><input type="checkbox" id="activityTabsEnabled"> Show All, Comments and History buttons</label>
+    <div class="hint">Keep activity filters visible alongside Jira's More menu.</div>
+  </div>
+  <div class="diff-settings">
+    <label for="defaultActivityFilter">Default activity filter</label>
+    <select id="defaultActivityFilter">
+      <option value="All">All</option>
+      <option value="Comments">Comments</option>
+      <option value="History">History</option>
+      <option value="Jira default">Keep Jira's default</option>
+    </select>
+    <div class="hint">Start each issue with All (the default), or choose another view. You can switch filters while viewing an issue.</div>
+  </div>
+  <div class="domain-settings">
     <label for="allowedDomains">Allowed Jira domains</label>
     <div class="domain-entry">
       <input id="allowedDomains" type="text" placeholder="jira.example.com">

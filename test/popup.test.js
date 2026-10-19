@@ -93,3 +93,36 @@ test('popup saves split views and offers context for split changed lines', async
   assert.equal(document.getElementById('contextLinesSetting').hidden, false);
   assert.equal(document.getElementById('contextLines').value, '2');
 });
+
+test('activity controls default to enabled with All, and save changes to the current tab', async t => {
+  const { document, window, settings, messages } = await setup(t);
+  const toggle = document.getElementById('activityTabsEnabled');
+  const filter = document.getElementById('defaultActivityFilter');
+  assert.equal(toggle.checked, true);
+  assert.equal(filter.value, 'All');
+  filter.value = 'History';
+  filter.dispatchEvent(new window.Event('change'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settings.defaultActivityFilter, 'History');
+  toggle.checked = false;
+  toggle.dispatchEvent(new window.Event('change'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settings.activityTabsEnabled, false);
+  assert.equal(filter.disabled, true);
+  assert.equal(messages.length, 2);
+  assert.ok(messages.every(message => message.action === 'checkExtensionState'));
+});
+
+test('activity options load saved choices and recover from an invalid default', async t => {
+  const saved = await setup(t, { activityTabsEnabled: false, defaultActivityFilter: 'Jira default' });
+  assert.equal(saved.document.getElementById('activityTabsEnabled').checked, false);
+  assert.equal(saved.document.getElementById('defaultActivityFilter').value, 'Jira default');
+  assert.equal(saved.document.getElementById('defaultActivityFilter').disabled, true);
+  const invalid = await setup(t, { defaultActivityFilter: 'unknown' });
+  assert.equal(invalid.document.getElementById('defaultActivityFilter').value, 'All');
+});
+
+test('popup ignores null, blank and non-string saved domains', async t => {
+  const { document } = await setup(t, { allowedDomains: [null, '', ' ', 123, 'https://jira.example.com/path'] });
+  assert.deepEqual([...document.querySelectorAll('.domain-item span')].map(label => label.textContent), ['jira.example.com']);
+});

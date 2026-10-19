@@ -1,8 +1,12 @@
+// Content scripts may be reinjected into an open tab after an extension reload.
+// Keep declarations private and dispose the preceding instance first.
+(() => {
 /* ---------- cross-browser shim ---------- */
 if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
   globalThis.chrome = browser;
 }
 /* --------------------------------------- */
+globalThis.__jiraDiffContentScript?.dispose();
 
 const isExtensionValid = () => chrome.runtime && chrome.runtime.id;
 const DEFAULT_LARGE_CHANGE_LIMIT = 500;
@@ -37,7 +41,7 @@ const normalizeDomainPattern = domain => {
   return normalized || null;
 }
 
-const isValidDomainPattern = domain => /^[a-z0-9.-]+$/.test(domain) && !domain.includes('..');
+const isValidDomainPattern = domain => typeof domain === 'string' && /^[a-z0-9.-]+$/.test(domain) && !domain.includes('..');
 
 const parseDomainPatterns = raw => {
   if (!raw) return [];
@@ -66,6 +70,294 @@ const urlMatchesAllowedDomain = async url => {
   }
 };
 
+// Keep Jira responsible for filtering and loading the feed. These shortcuts
+// invoke its existing controls, including menu items rendered in a portal.
+const ActivityControls = {
+  labels: ['All', 'Comments', 'History'],
+  initialized: new Set(),
+  pending: null,
+  generation: 0,
+  context: null,
+  defaultTasks: new Map(),
+
+  controlText(control) {
+    const copy = control.cloneNode(true);
+    copy.querySelectorAll('svg, [aria-hidden="true"]').forEach(node => node.remove());
+    return copy.textContent.replace(/\s+/g, ' ').trim();
+  },
+
+  label(button) {
+    const text = this.controlText(button).replace(/\s*\(?\d+\)?$/, '').trim();
+    if (/^all comments$/i.test(text)) return 'Comments';
+    if (/^all activity$/i.test(text)) return 'All';
+    return [...this.labels, 'Work log', 'Zendesk Support', 'Transitions', 'Approvals']
+      .find(label => label.toLowerCase() === text.toLowerCase());
+  },
+
+  nativeButtons(root) {
+    return [...root.querySelectorAll('button, [role="tab"], [role="button"]')]
+      .filter(button => !button.closest('.jira-activity-shortcuts, [role="menu"], [role="listbox"], [role^="menuitem"], [role="option"]'));
+  },
+
+  moreButton(root) {
+    return this.nativeButtons(root).find(button => /^More\b/i.test(this.controlText(button)) ||
+      /^More\b/i.test(button.getAttribute('aria-label') || ''));
+  },
+
+  dropdownButton(root) {
+    return this.moreButton(root) || this.nativeButtons(root).find(button =>
+      this.label(button) && ['true', 'menu', 'listbox'].includes(button.getAttribute('aria-haspopup')));
+  },
+
+  findToolbars() {
+    const roots = new Set();
+    // Prefer Jira's activity-specific hooks. The heading fallback supports
+    // layouts where the new controls no longer carry the old test IDs.
+    const anchors = [...document.querySelectorAll('#JSW_ACTIVITY_FEED_BUTTONS, [data-testid^="issue-activity-feed.ui.buttons"], [data-testid*="issue-activity-feed"]')];
+    // The Activity title can be a styled span/div rather than a semantic heading.
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const title = walker.currentNode.parentElement;
+      if (walker.currentNode.textContent.trim() === 'Activity' && title.textContent.trim() === 'Activity') anchors.push(title);
+    }
+    for (const anchor of anchors) {
+      if (anchor.closest('.jira-activity-shortcuts, [role="menu"], [role="listbox"], [data-testid*="issue-create"]')) continue;
+      let root = anchor;
+      for (let depth = 0; root && root !== document.body && depth < 10; depth++, root = root.parentElement) {
+        const buttons = this.nativeButtons(root);
+        const filters = buttons.filter(button => this.label(button));
+        const more = this.dropdownButton(root);
+        if (filters.length && (more || filters.length >= 2)) {
+          // Scope to the filter row, excluding buttons in history entries or
+          // the comment editor below it when the title anchors a whole section.
+          let toolbar = (more || filters[0]).parentElement;
+          while (toolbar && root.contains(toolbar)) {
+            const nearbyFilters = this.nativeButtons(toolbar).filter(button => this.label(button));
+            if (nearbyFilters.length && (more || nearbyFilters.length >= 2)) {
+              roots.add(toolbar);
+              break;
+            }
+            if (toolbar === root) break;
+            toolbar = toolbar.parentElement;
+          }
+          break;
+        }
+      }
+    }
+    // A heading and a test ID can identify overlapping containers.
+    return [...roots].filter(root => ![...roots].some(other => other !== root && root.contains(other)));
+  },
+
+  selected(root) {
+    const filters = this.nativeButtons(root).filter(button => this.label(button));
+    const active = filters.find(button => button.getAttribute('aria-selected') === 'true' ||
+      button.getAttribute('aria-pressed') === 'true' || button.getAttribute('data-state') === 'active');
+    const selected = active || (filters.length === 1 ? filters[0] : null);
+    return selected ? this.label(selected) : undefined;
+  },
+
+  syncSelection(root) {
+    const selected = this.selected(root);
+    for (const button of root.querySelectorAll('.jira-activity-shortcuts button')) {
+      const pressed = String(button.textContent === selected);
+      if (button.getAttribute('aria-pressed') !== pressed) button.setAttribute('aria-pressed', pressed);
+    }
+  },
+
+  async enhance() {
+    const generation = this.generation;
+    const settings = await chrome.storage.sync.get(['activityTabsEnabled', 'defaultActivityFilter']);
+    if (generation !== this.generation) return;
+    if (settings.activityTabsEnabled === false) {
+      this.remove();
+      this.initialized.clear();
+      return;
+    }
+    const defaultFilter = [...this.labels, 'Jira default'].includes(settings.defaultActivityFilter)
+      ? settings.defaultActivityFilter : 'All';
+    const context = `${window.location.pathname}${window.location.search}|${defaultFilter}`;
+    if (this.context !== context) {
+      this.context = context;
+      this.initialized.clear();
+    }
+    for (const root of this.findToolbars()) {
+      const buttons = this.nativeButtons(root);
+      const filters = buttons.filter(button => this.label(button));
+      const more = this.dropdownButton(root);
+      // Already-visible native tabs are kept intact.
+      if (more && filters.length === 1) {
+        root.classList.add('jira-activity-toolbar');
+        more.classList.add('jira-activity-more');
+        let shortcuts = root.querySelector('.jira-activity-shortcuts');
+        if (!shortcuts) {
+          shortcuts = document.createElement('span');
+          shortcuts.className = 'jira-activity-shortcuts';
+          shortcuts.setAttribute('role', 'group');
+          shortcuts.setAttribute('aria-label', 'Activity filters');
+          for (const label of this.labels) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            button.addEventListener('click', () => {
+              this.initialized.add(this.context); // An explicit choice takes precedence over the opening default.
+              this.select(root, label).catch(error => console.error('Could not select Jira activity filter:', error));
+            });
+            shortcuts.appendChild(button);
+          }
+          const status = document.createElement('span');
+          status.className = 'jira-activity-status';
+          status.setAttribute('role', 'status');
+          shortcuts.appendChild(status);
+          filters[0].before(shortcuts);
+        }
+        // A single-dropdown layout needs to retain its native trigger for
+        // activity types beyond the three shortcuts.
+        if (more !== filters[0]) filters[0].classList.add('jira-activity-native-filter');
+        this.syncSelection(root);
+      } else if (filters.length > 1) {
+        root.classList.remove('jira-activity-toolbar');
+        this.nativeButtons(root).forEach(button => button.classList.remove('jira-activity-more'));
+        root.querySelectorAll('.jira-activity-shortcuts').forEach(element => element.remove());
+        filters.forEach(button => button.classList.remove('jira-activity-native-filter'));
+      }
+      const key = context;
+      if (defaultFilter !== 'Jira default' && !this.initialized.has(key) && !this.defaultTasks.has(key)) {
+        const task = this.applyDefault(root, defaultFilter, key, this.generation);
+        this.defaultTasks.set(key, task);
+        task.catch(error => console.error('Could not set Jira activity default:', error))
+          .finally(() => {
+            if (this.defaultTasks.get(key) === task) this.defaultTasks.delete(key);
+          });
+      }
+    }
+  },
+
+  async applyDefault(root, label, context, generation) {
+    // Allow Jira to restore its saved filter and attach React handlers first.
+    // A failed click must not count as a successfully applied default.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      if (generation !== this.generation || context !== this.context || this.initialized.has(context)) return;
+      if (!root.isConnected) root = this.findToolbars()[0];
+      if (!root) continue;
+      if (this.selected(root) !== label) await this.select(root, label);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (generation !== this.generation || context !== this.context) return;
+      if (this.selected(root) === label) {
+        this.initialized.add(context);
+        DiffHighlighter.debouncedEnhanceDiff();
+        return;
+      }
+    }
+    // Stop automatic retries, but allow a manual shortcut or setting change.
+    this.initialized.add(context);
+  },
+
+  async select(root, label) {
+    if (this.pending || !root.isConnected) return false;
+    if (this.selected(root) === label) return true;
+    const native = this.nativeButtons(root).find(button => this.label(button) === label);
+    if (native && !native.disabled && native.getAttribute('aria-disabled') !== 'true') {
+      native.click();
+      DiffHighlighter.debouncedEnhanceDiff();
+      return true;
+    }
+    const more = this.dropdownButton(root);
+    if (!more || more.disabled) return false;
+    const generation = this.generation;
+    this.pending = root;
+    const shortcuts = root.querySelector('.jira-activity-shortcuts');
+    const status = shortcuts?.querySelector('[role="status"]');
+    const previousFocus = document.activeElement;
+    const returnFocus = shortcuts?.contains(document.activeElement);
+    if (status) status.textContent = '';
+    shortcuts?.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    let opened = false;
+    let selected = false;
+    const menuSelector = '[role="menu"], [role="listbox"], [data-testid*="dropdown-menu"]:not(button):not([role="button"]), [data-testid*="popup-content"]';
+    const existingMenus = new Set(document.querySelectorAll(menuSelector));
+    const quietMenus = new Set();
+    // Mark the newly mounted Jira popup in the mutation microtask, before the
+    // browser paints it. Keep its layout and native handlers intact.
+    const quietMenuObserver = new MutationObserver(() => {
+      for (const menu of document.querySelectorAll(menuSelector)) {
+        if (!existingMenus.has(menu) && menu !== root && !menu.contains(root)) {
+          menu.classList.add('jira-activity-switching-menu');
+          quietMenus.add(menu);
+        }
+      }
+    });
+    if (more.getAttribute('aria-expanded') !== 'true') {
+      const controlled = document.getElementById((more.getAttribute('aria-controls') || '').split(/\s+/)[0]);
+      if (controlled && controlled !== root && !controlled.contains(root)) {
+        controlled.classList.add('jira-activity-switching-menu');
+        quietMenus.add(controlled);
+      }
+      quietMenuObserver.observe(document.body, { childList: true, subtree: true });
+    }
+    try {
+      if (more.getAttribute('aria-expanded') !== 'true') {
+        more.click();
+        opened = true;
+      }
+      // Jira mounts menu items asynchronously, sometimes outside the issue DOM.
+      for (let attempt = 0; attempt < 30; attempt++) {
+        if (generation !== this.generation || !root.isConnected) return false;
+        const controlled = document.getElementById((more.getAttribute('aria-controls') || '').split(/\s+/)[0]);
+        const menus = controlled ? [controlled] : [...document.querySelectorAll(menuSelector)]
+          .filter(menu => !existingMenus.has(menu) || (more.id && menu.getAttribute('aria-labelledby') === more.id) ||
+            (!opened && document.querySelectorAll(menuSelector).length === 1));
+        const candidates = menus.flatMap(menu => [...menu.querySelectorAll('[role^="menuitem"], [role="option"], [role="button"], button, a')]);
+        const item = candidates.find(button => this.label(button) === label && !button.disabled &&
+          button.getAttribute('aria-disabled') !== 'true' && !button.closest('[hidden], [aria-hidden="true"]'));
+        if (item) {
+          item.click();
+          selected = true;
+          DiffHighlighter.debouncedEnhanceDiff();
+          return true;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (status) status.textContent = `${label} is unavailable. Use Jira's More menu to choose an activity filter.`;
+      return false;
+    } finally {
+      if (opened) {
+        // Allow React to unmount the selected item before exposing the popup
+        // again. Failure/cancellation also closes only the menu we opened.
+        for (let attempt = 0; selected && more.getAttribute('aria-expanded') === 'true' && attempt < 4; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        if (more.isConnected && more.getAttribute('aria-expanded') === 'true') more.click();
+        if ([...quietMenus].some(menu => menu.isConnected)) await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      quietMenuObserver.disconnect();
+      quietMenus.forEach(menu => menu.classList.remove('jira-activity-switching-menu'));
+      if (root.isConnected && generation === this.generation) {
+        this.syncSelection(root);
+        window.requestAnimationFrame?.(() => {
+          if (root.isConnected && generation === this.generation) this.syncSelection(root);
+        });
+      }
+      this.pending = null;
+      shortcuts?.querySelectorAll('button').forEach(button => { button.disabled = false; });
+      if (returnFocus && shortcuts?.isConnected) {
+        [...shortcuts.querySelectorAll('button')].find(button => button.textContent === label)?.focus();
+      } else if (opened && previousFocus?.isConnected && previousFocus !== document.body) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    }
+  },
+
+  remove() {
+    this.generation++;
+    this.defaultTasks.clear();
+    document.querySelectorAll('.jira-activity-shortcuts').forEach(element => element.remove());
+    document.querySelectorAll('.jira-activity-native-filter').forEach(element => element.classList.remove('jira-activity-native-filter'));
+    document.querySelectorAll('.jira-activity-toolbar').forEach(element => element.classList.remove('jira-activity-toolbar'));
+    document.querySelectorAll('.jira-activity-more').forEach(element => element.classList.remove('jira-activity-more'));
+  },
+};
+
 const DiffHighlighter = {
   isForbiddenContainer(el) {
     return !!el?.closest('[data-testid*="issue-create"]');
@@ -82,7 +374,7 @@ const DiffHighlighter = {
     }
 
     return Boolean(
-      document.querySelector('[data-testid*=\"issue-activity-feed.ui.buttons.\"]') ||
+      document.querySelector('#JSW_ACTIVITY_FEED_BUTTONS, [data-testid^="issue-activity-feed.ui.buttons"]') ||
       document.querySelector('[data-testid*=\"issue.views.issue-base.foundation.breadcrumbs.breadcrumbs-container\"]')
     );
   },
@@ -104,6 +396,7 @@ const DiffHighlighter = {
       if (!isExtensionValid()) return;
       if (!await this.isAllowedJiraPage()) return;
       const data = await chrome.storage.sync.get('extensionEnabled');
+      if (this.disposed) return;
       if (data.extensionEnabled !== false) {
         this.enhanceDiff();
         this.setupObserver();
@@ -115,16 +408,19 @@ const DiffHighlighter = {
 
   async enhanceDiff() {
     try {
-      if (this.isEnhancing) return;
+      if (this.disposed || this.isEnhancing) return;
       this.isEnhancing = true;
 
       if (!isExtensionValid()) return;
 
       const { extensionEnabled } = await chrome.storage.sync.get('extensionEnabled');
-      if (extensionEnabled === false) return;
+      if (this.disposed || extensionEnabled === false) return;
 
+      await ActivityControls.enhance();
+      if (this.disposed) return;
       const diffContainers = this.findDiffContainers();
       const settings = await getDiffSettings();
+      if (this.disposed) return;
 
       for (const [index, container] of diffContainers.entries()) {
         if (!container || !(container instanceof HTMLElement)) continue;
@@ -255,7 +551,7 @@ const DiffHighlighter = {
 
   createEnhancedDiff(oldText, newText, largeChangeLimit = DEFAULT_LARGE_CHANGE_LIMIT, settings = {}) {
     if (normalizeDiffView(settings.diffView) === 'original') {
-      return this.createOriginalPreview(settings);
+      return this.createOriginalPreview(oldText, newText, settings);
     }
     try {
       return this.createGitDiff(oldText, newText, largeChangeLimit, settings);
@@ -265,13 +561,11 @@ const DiffHighlighter = {
     }
   },
 
-  createOriginalPreview(settings) {
+  createOriginalPreview(oldText, newText, settings) {
     const container = document.createElement('div');
     container.className = 'enhanced-diff original-diff';
     const toolbar = document.createElement('div');
     toolbar.className = 'diff-toolbar';
-    const title = document.createElement('span');
-    title.textContent = 'Original values';
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'diff-view-toggle';
@@ -284,6 +578,9 @@ const DiffHighlighter = {
         this.debouncedEnhanceDiff();
       }
     });
+    const title = document.createElement('span');
+    title.className = 'diff-toolbar-title';
+    title.textContent = 'Original values';
     toolbar.append(title, toggle);
     container.appendChild(toolbar);
     return container;
@@ -345,12 +642,10 @@ const DiffHighlighter = {
 
     const toolbar = document.createElement('div');
     toolbar.className = 'diff-toolbar';
-    const title = document.createElement('span');
-    title.textContent = 'Before → After';
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'diff-view-toggle';
-    toolbar.append(title, toggle);
+    toolbar.append(toggle);
     const body = document.createElement('div');
     body.className = 'diff-lines';
     container.appendChild(toolbar);
@@ -619,7 +914,7 @@ const DiffHighlighter = {
   },
 
   setupObserver() {
-    if (window.diffObserver) return;
+    if (this.disposed || window.diffObserver) return;
 
     const triggerEnhance = () => {
       if (!this.isEnhancing) this.debouncedEnhanceDiff();
@@ -627,8 +922,8 @@ const DiffHighlighter = {
 
     window.diffObserver = new MutationObserver(muts => {
       const relevant = muts.some(m =>
-        (m.addedNodes.length || m.removedNodes.length || m.type === 'characterData') &&
-        !(m.target instanceof Element ? m.target : m.target.parentElement)?.closest('.enhanced-diff')
+        (m.addedNodes.length || m.removedNodes.length || m.type === 'characterData' || m.type === 'attributes') &&
+        !(m.target instanceof Element ? m.target : m.target.parentElement)?.closest('.enhanced-diff, .jira-activity-shortcuts')
       );
       if (relevant) triggerEnhance();
     });
@@ -636,21 +931,34 @@ const DiffHighlighter = {
     window.diffObserver.observe(document.body, {
       childList: true,
       characterData: true,
+      attributes: true,
+      attributeFilter: ['aria-selected', 'aria-pressed', 'aria-expanded', 'data-state'],
       subtree: true
     });
 
-    document.addEventListener(
-      'click',
-      e => {
-        const btn = e.target.closest(
-          '[data-testid^="issue-activity-feed.ui.buttons."]'
-        );
-        if (!btn) return;
+    this.activityClickHandler = e => {
+      if (!(e.target instanceof Element)) return;
+      const control = e.target.closest('button, [role="tab"], [role="button"]');
+      if (e.isTrusted && control && ActivityControls.findToolbars().some(root => root.contains(control))) {
+        ActivityControls.initialized.add(ActivityControls.context);
+      }
+      const btn = e.target.closest(
+        '#JSW_ACTIVITY_FEED_BUTTONS button, [data-testid^="issue-activity-feed.ui.buttons"]'
+      );
+      if (!btn) return;
 
-        setTimeout(triggerEnhance, 200);
-      },
-      true
-    );
+      setTimeout(triggerEnhance, 200);
+    };
+    document.addEventListener('click', this.activityClickHandler, true);
+  },
+
+  disconnectObserver() {
+    window.diffObserver?.disconnect();
+    window.diffObserver = null;
+    if (this.activityClickHandler) {
+      document.removeEventListener('click', this.activityClickHandler, true);
+      this.activityClickHandler = null;
+    }
   },
 
   async removeEnhancements() {
@@ -684,10 +992,9 @@ const MessageHandler = {
           DiffHighlighter.setupObserver();
         } else {
           await DiffHighlighter.removeEnhancements();
-          if (window.diffObserver) {
-            window.diffObserver.disconnect();
-            window.diffObserver = null;
-          }
+          ActivityControls.remove();
+          ActivityControls.initialized.clear();
+          DiffHighlighter.disconnectObserver();
         }
         sendResponse({status: "success"});
       } else if (request.action === "checkExtensionState") {
@@ -698,10 +1005,9 @@ const MessageHandler = {
           DiffHighlighter.setupObserver();
         } else {
           await DiffHighlighter.removeEnhancements();
-          if (window.diffObserver) {
-            window.diffObserver.disconnect();
-            window.diffObserver = null;
-          }
+          ActivityControls.remove();
+          ActivityControls.initialized.clear();
+          DiffHighlighter.disconnectObserver();
         }
         sendResponse({status: "success"});
       }
@@ -714,25 +1020,40 @@ const MessageHandler = {
 
 function debounce(func, wait) {
   let timeout;
-  return function executedFunction(...args) {
+  function executedFunction(...args) {
     const later = () => {
       clearTimeout(timeout);
       func.apply(this, args);
     };
     clearTimeout(timeout);
     timeout = setTimeout(later, wait);
-  };
+  }
+  executedFunction.cancel = () => clearTimeout(timeout);
+  return executedFunction;
 }
 
 // Initialize
 DiffHighlighter.debouncedEnhanceDiff = debounce(DiffHighlighter.enhanceDiff.bind(DiffHighlighter), 250);
-DiffHighlighter.init();
-
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+const messageListener = (request, sender, sendResponse) => {
   MessageHandler.handleMessage(request, sender, sendResponse)
     .catch(error => {
       console.error('Error in message listener:', error);
       sendResponse({status: "error", message: error.message});
     });
   return true;
-});
+};
+globalThis.__jiraDiffContentScript = {
+  highlighter: DiffHighlighter,
+  activityControls: ActivityControls,
+  dispose() {
+    DiffHighlighter.disposed = true;
+    DiffHighlighter.disconnectObserver();
+    DiffHighlighter.debouncedEnhanceDiff.cancel();
+    DiffHighlighter.removeEnhancements();
+    ActivityControls.remove();
+    chrome.runtime.onMessage.removeListener?.(messageListener);
+  },
+};
+DiffHighlighter.init();
+chrome.runtime.onMessage.addListener(messageListener);
+})();

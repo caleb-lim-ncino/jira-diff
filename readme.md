@@ -8,6 +8,7 @@ Jira Diff Highlighter is a cross-browser extension (Chrome & Firefox) that enhan
 - **Raw Formatting**: Preserves literal heading markers, asterisks, indentation, and trailing spaces. Rendered headings are represented as plain hashtag-prefixed text.
 - **Expandable Context**: Show hidden unchanged sections or switch an individual preview to all lines without changing your saved preference.
 - **Custom Field Support**: Enhances any field update displayed as old and new values in the activity history, including fields being populated or cleared. No field-name configuration is needed.
+- **Activity Controls**: Keeps All, Comments and History visible when Jira places filters behind More. Starts each issue with All by default; choose a different default or disable the shortcuts in the popup. Other activity types remain available in More.
 - **Highlighted Changes**: Color-codes additions, deletions, and modifications for quick identification.
 - **Configurable Large Change Handling**: Collapses large insertions and deletions above your chosen character limit, with one-click access to show the full text.
 - **Toggle Functionality**: Easily switch between enhanced and original diff views.
