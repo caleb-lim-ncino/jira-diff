@@ -12,6 +12,9 @@ const isExtensionValid = () => chrome.runtime && chrome.runtime.id;
 const DEFAULT_LARGE_CHANGE_LIMIT = 500;
 const MIN_LARGE_CHANGE_LIMIT = 1;
 const MAX_LARGE_CHANGE_LIMIT = 10000;
+const ROVO_ACTION_CARD = '[data-testid="update-work-item-all-fields-action-renderer.ui.action-card"]';
+const ROVO_FIELD_ROW = '[data-testid="update-work-item-all-fields-action-renderer.ui.card-fields-list"]';
+const ROVO_TOOLTIP = '[data-testid="update-work-item-all-fields-action-renderer.ui.action-card.card-fields-list.field-tooltip-content"]';
 
 const normalizeLargeChangeLimit = value => {
   const parsed = Number.parseInt(value, 10);
@@ -26,11 +29,12 @@ const normalizeContextLines = value => {
 };
 
 const getDiffSettings = async () => {
-  const data = await chrome.storage.sync.get(['largeChangeLimit', 'diffView', 'contextLines']);
+  const data = await chrome.storage.sync.get(['largeChangeLimit', 'diffView', 'contextLines', 'rovoPreviewsEnabled']);
   return {
     largeChangeLimit: normalizeLargeChangeLimit(data.largeChangeLimit),
     diffView: normalizeDiffView(data.diffView),
     contextLines: normalizeContextLines(data.contextLines),
+    rovoPreviewsEnabled: data.rovoPreviewsEnabled !== false,
   };
 };
 
@@ -421,6 +425,7 @@ const DiffHighlighter = {
       const diffContainers = this.findDiffContainers();
       const settings = await getDiffSettings();
       if (this.disposed) return;
+      this.enhanceRovoPreviews(settings);
 
       for (const [index, container] of diffContainers.entries()) {
         if (!container || !(container instanceof HTMLElement)) continue;
@@ -561,11 +566,409 @@ const DiffHighlighter = {
     }
   },
 
+  createLargePreview(oldText, newText, settings = {}, fields = []) {
+    this.closeLargePreview?.();
+    const overlay = document.createElement('div');
+    overlay.className = 'jira-diff-large-preview-overlay';
+    const modal = document.createElement('div');
+    modal.className = 'jira-diff-large-preview';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Full diff preview');
+    const header = document.createElement('div');
+    header.className = 'jira-diff-preview-header';
+    const title = document.createElement('h2');
+    title.textContent = 'Full diff preview';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'jira-diff-preview-close';
+    closeButton.textContent = 'Close';
+    const content = document.createElement('div');
+    content.className = 'jira-diff-preview-content';
+    const previewSettings = {
+      ...settings,
+      diffView: ['changes', 'full'].includes(settings.diffView) ? 'full' : 'side-by-side',
+    };
+    const renderPreview = field => {
+      content.replaceChildren();
+      if (field && field.oldText === undefined) {
+        const message = document.createElement('p');
+        message.className = 'jira-diff-preview-empty';
+        message.textContent = `Hover ${field.label} in the Rovo card to load its comparison, then reopen View full diff.`;
+        content.appendChild(message);
+        return;
+      }
+      const preview = this.createGitDiff(field?.oldText ?? oldText, field?.newText ?? newText, Infinity, previewSettings);
+      preview.querySelector('.diff-large-preview')?.remove();
+      const lines = preview.querySelector('.diff-lines');
+      lines.tabIndex = 0;
+      lines.setAttribute('role', 'region');
+      lines.setAttribute('aria-label', 'Scrollable diff lines');
+      content.appendChild(preview);
+    };
+    header.append(title, closeButton);
+    if (fields.length > 1) {
+      const select = document.createElement('select');
+      select.className = 'jira-diff-preview-field';
+      select.setAttribute('aria-label', 'Suggested field');
+      fields.forEach((field, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = field.label;
+        select.appendChild(option);
+      });
+      select.selectedIndex = Math.max(0, fields.findIndex(field => field.oldText !== undefined));
+      select.addEventListener('change', () => renderPreview(fields[select.selectedIndex]));
+      header.insertBefore(select, closeButton);
+      renderPreview(fields[select.selectedIndex]);
+    } else {
+      renderPreview(fields[0]);
+    }
+    modal.append(header, content);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    document.body.classList.add('jira-diff-preview-open');
+
+    const previousFocus = document.activeElement;
+    const close = () => {
+      document.removeEventListener('keydown', escapeHandler, true);
+      overlay.remove();
+      document.body.classList.remove('jira-diff-preview-open');
+      this.closeLargePreview = null;
+      previousFocus?.focus?.({ preventScroll: true });
+    };
+    const escapeHandler = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        close();
+      } else if (event.key === 'Tab') {
+        const controls = [...modal.querySelectorAll('button:not(:disabled), select, [tabindex="0"]')];
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay) close();
+    });
+    document.addEventListener('keydown', escapeHandler, true);
+    closeButton.addEventListener('click', close);
+    this.closeLargePreview = close;
+    closeButton.focus();
+    return close;
+  },
+
+  findRovoConfirmationCards(root = document) {
+    const cards = new Set(root.querySelectorAll('[data-testid="update-work-item-all-fields-action-renderer.ui.action-card"]'));
+    for (const element of root.querySelectorAll('button, [role="button"], section, div')) {
+      if (element.closest('.jira-diff-rovo-card, .jira-activity-shortcuts, .enhanced-diff, .jira-diff-large-preview-overlay') || this.isForbiddenContainer(element)) continue;
+      if (!/^(?:accept all|accept changes|review and accept changes)$/i.test(ActivityControls.controlText(element))) continue;
+      const nativeCard = element.closest(ROVO_ACTION_CARD);
+      if (nativeCard) {
+        cards.add(nativeCard);
+        continue;
+      }
+      if (!element.matches('button, [role="button"]') && element.querySelector('button, [role="button"], section, div')) continue;
+      // A button's own test ID identifies the control, not the suggestion.
+      for (let card = element.parentElement; card && card !== document.body; card = card.parentElement) {
+        const containedCards = card.querySelectorAll(ROVO_ACTION_CARD);
+        if (containedCards.length) {
+          if (containedCards.length === 1) cards.add(containedCards[0]);
+          break;
+        }
+        if (this.getRovoExplicitChange(card) || this.getRovoFieldTarget(card)) {
+          cards.add(card);
+          break;
+        }
+        if (card.matches('article, [role="dialog"]')) break;
+      }
+    }
+    return [...cards].filter(card => !this.isForbiddenContainer(card) &&
+      ![...cards].some(other => other !== card && card.contains(other)));
+  },
+
+  getRovoFieldTarget(card) {
+    if (!(card instanceof HTMLElement)) return null;
+    const editable = card.querySelector('[contenteditable="true"], textarea');
+    if (editable) return editable;
+
+    const headings = [...card.querySelectorAll('h2, h3, h4, h5, h6, label, strong, dt')]
+      .filter(label => ['current acceptance criteria', 'description', 'acceptance criteria', 'summary', 'product copy']
+        .includes(label.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() || ''));
+    if (!headings.length) return null;
+
+    const heading = headings[0];
+    const block = ['P', 'DIV', 'SECTION', 'ARTICLE', 'UL', 'OL', 'TEXTAREA'].includes(heading.nextElementSibling?.tagName || '')
+      ? heading.nextElementSibling : heading.parentElement;
+    return block instanceof HTMLElement ? block : null;
+  },
+
+  getRovoExplicitChange(card) {
+    if (!(card instanceof window.HTMLElement)) return null;
+    const headings = [...card.querySelectorAll('h2, h3, h4, h5, h6, label, strong, dt, span, div')]
+      .filter(element => !element.closest('.jira-diff-rovo-card, .enhanced-diff'));
+    const findLabeledValue = expression => {
+      const heading = headings.find(element => expression.test(element.textContent?.replace(/\s+/g, ' ').trim() || '') &&
+        ![...element.children].some(child => expression.test(child.textContent?.replace(/\s+/g, ' ').trim() || '')));
+      if (!heading) return null;
+      let value = heading?.nextElementSibling;
+      if (!value && heading?.parentElement?.textContent.trim() === heading.textContent.trim()) value = heading.parentElement.nextElementSibling;
+      return value instanceof HTMLElement ? this.captureRovoFieldText(value) : null;
+    };
+    const field = '(?:acceptance criteria|description|summary|product copy|value)';
+    const oldText = findLabeledValue(new RegExp(`^(?:(?:current|original|old)(?: ${field})?|before):?$`, 'i'));
+    const newText = findLabeledValue(new RegExp(`^(?:(?:suggested|proposed|new)(?: (?:update|${field}))?|after):?$`, 'i'));
+    if (oldText === null || newText === null) return this.getRovoInlineChange(card);
+    return { oldText, newText };
+  },
+
+  getRovoInlineChange(root) {
+    const containers = [...root.querySelectorAll('.ak-renderer-document, [data-testid*="diff"]')];
+    if (root.matches('.ak-renderer-document, [data-testid*="diff"]')) containers.unshift(root);
+    const candidates = containers.filter(container => container.querySelector('ins, del') &&
+      !container.closest('.jira-diff-rovo-card, .enhanced-diff') &&
+      !containers.some(other => other !== container && container.contains(other) && other.querySelector('ins, del')));
+    // Do not join unrelated fields or guess a baseline from the new value.
+    if (candidates.length !== 1) return null;
+    const before = candidates[0].cloneNode(true);
+    const after = candidates[0].cloneNode(true);
+    before.querySelectorAll('ins').forEach(node => node.remove());
+    after.querySelectorAll('del').forEach(node => node.remove());
+    return { oldText: this.readFieldText(before), newText: this.readFieldText(after) };
+  },
+
+  captureRovoFieldText(field) {
+    if (!field) return null;
+    const editable = field.isContentEditable ? field : field.querySelector('[contenteditable="true"]');
+    const textarea = field.matches('textarea') ? field : field.querySelector?.('textarea');
+    if (editable) return this.readFieldText(editable);
+    if (textarea) return textarea.value;
+    return this.readFieldText(field);
+  },
+
+  getRovoLinkedPreview(card) {
+    // Atlassian mounts hover previews in a portal. Only follow an explicit
+    // association so another work item's suggestion cannot supply these values.
+    const roots = new Set();
+    for (const tooltip of document.querySelectorAll(ROVO_TOOLTIP)) {
+      if (this.rovoTooltipOwners.get(tooltip) === card) roots.add(tooltip);
+    }
+    const anchors = new Set();
+    for (const element of [card, ...card.querySelectorAll('[aria-controls], [aria-describedby], [style]')]) {
+      for (const attribute of ['aria-controls', 'aria-describedby']) {
+        for (const id of (element.getAttribute(attribute) || '').split(/\s+/).filter(Boolean)) {
+          const root = document.getElementById(id);
+          if (root) roots.add(root);
+        }
+      }
+      const names = element.style.getPropertyValue('anchor-name');
+      names.split(/[,\s]+/).filter(name => name.startsWith('--')).forEach(name => anchors.add(name));
+    }
+    if (anchors.size) {
+      for (const element of document.querySelectorAll('[style], [popover], [role="tooltip"], [data-testid*="preview"], [data-testid*="popover"], [data-testid*="popup"]')) {
+        const anchor = element.style.getPropertyValue('position-anchor').trim() ||
+          window.getComputedStyle(element).getPropertyValue('position-anchor').trim();
+        if (anchors.has(anchor)) roots.add(element);
+      }
+    }
+    for (const root of roots) {
+      const change = this.getRovoExplicitChange(root);
+      if (change) return change;
+    }
+    return null;
+  },
+
+  rovoPreviewValues: new WeakMap(),
+  rovoLaunchers: new WeakMap(),
+  rovoTooltipOwners: new WeakMap(),
+  activeRovoField: null,
+
+  captureRovoTooltips(mutations = []) {
+    if (this.rovoEnabled === false) return;
+    for (const tooltip of document.querySelectorAll(ROVO_TOOLTIP)) {
+      const changed = mutations.some(mutation => {
+        const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
+        if (target?.closest('.jira-diff-rovo-card, .enhanced-diff')) return false;
+        const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
+        if (nodes.length && nodes.every(node => node instanceof Element && node.matches('.jira-diff-rovo-card, .jira-diff-large-preview-overlay'))) return false;
+        return tooltip.contains(mutation.target) ||
+          [...mutation.addedNodes].some(node => node === tooltip || node.contains?.(tooltip));
+      });
+      if (this.activeRovoField?.isConnected && changed) {
+        const field = this.activeRovoField.querySelector('[data-testid$="card-fields-list.rich-text-field"]')?.textContent
+          ?.replace(/^Update\s+/i, '').trim().toLowerCase();
+        const currentLabel = tooltip.querySelector('[data-testid$=".current"] h5')?.textContent?.trim().toLowerCase();
+        if (!field || !currentLabel || currentLabel === `current ${field}`) {
+          this.rovoTooltipOwners.set(tooltip, this.activeRovoField);
+        } else {
+          this.rovoTooltipOwners.delete(tooltip);
+        }
+      }
+      const owner = this.rovoTooltipOwners.get(tooltip);
+      const change = this.getRovoExplicitChange(tooltip);
+      if (owner && change) this.rovoPreviewValues.set(owner, change);
+    }
+  },
+
+  getRovoChange(card) {
+    const change = this.getRovoExplicitChange(card) || this.getRovoLinkedPreview(card);
+    if (change) this.rovoPreviewValues.set(card, change);
+    return change || this.rovoPreviewValues.get(card) || null;
+  },
+
+  addRovoCard(card, settings) {
+    if (!(card instanceof window.HTMLElement)) return;
+    if (card.matches(ROVO_ACTION_CARD)) {
+      card.querySelectorAll(ROVO_FIELD_ROW).forEach(row => this.getRovoChange(row));
+      this.renderRovoLauncher(card, null, settings);
+      return;
+    }
+    const explicitChange = this.getRovoChange(card);
+    const observedValue = explicitChange?.newText ??
+      this.captureRovoFieldText(this.getRovoFieldTarget(card));
+    if (observedValue === null) {
+      if (card.matches(`${ROVO_ACTION_CARD}, ${ROVO_FIELD_ROW}`)) {
+        this.renderRovoLauncher(card, null, settings);
+      }
+      return;
+    }
+
+    let oldText;
+    let newText;
+    if (explicitChange) {
+      oldText = explicitChange.oldText;
+      newText = explicitChange.newText;
+      card.removeAttribute('data-jira-diff-rovo-baseline');
+    } else if (!card.hasAttribute('data-jira-diff-rovo-baseline')) {
+      card.setAttribute('data-jira-diff-rovo-baseline', observedValue);
+      return;
+    } else if (observedValue === card.getAttribute('data-jira-diff-rovo-baseline')) {
+      this.rovoLaunchers.get(card)?.remove();
+      return;
+    } else {
+      oldText = card.getAttribute('data-jira-diff-rovo-baseline');
+      newText = observedValue;
+    }
+
+    if (oldText === newText) {
+      this.rovoLaunchers.get(card)?.remove();
+      return;
+    }
+    this.renderRovoLauncher(card, { oldText, newText }, settings);
+  },
+
+  renderRovoLauncher(card, change, settings) {
+    const buttonsIn = root => [...root.querySelectorAll('button, [role="button"]')]
+      .filter(button => !button.closest('.jira-diff-rovo-card, .enhanced-diff') && !button.closest(ROVO_FIELD_ROW));
+    let scope = card;
+    let nativeButtons = buttonsIn(scope);
+    let accept = nativeButtons.find(button => /^(?:accept all|accept changes|review and accept changes)$/i.test(ActivityControls.controlText(button)));
+    // Some cards put the shared actions in a sibling of the fields renderer.
+    if (!accept && card.matches(ROVO_ACTION_CARD)) {
+      for (let parent = card.parentElement, depth = 0; parent && parent !== document.body && depth < 3; parent = parent.parentElement, depth++) {
+        if (parent.querySelectorAll(ROVO_ACTION_CARD).length !== 1) break;
+        const buttons = buttonsIn(parent);
+        const sharedAccept = buttons.find(button => /^accept all$/i.test(ActivityControls.controlText(button)));
+        if (sharedAccept) {
+          scope = parent;
+          nativeButtons = buttons;
+          accept = sharedAccept;
+          break;
+        }
+      }
+    }
+    const dismiss = nativeButtons.find(button => /^dismiss$/i.test(ActivityControls.controlText(button)));
+    let footer = accept?.parentElement;
+    while (footer && footer !== scope && dismiss && !footer.contains(dismiss)) footer = footer.parentElement;
+    if (!footer || !scope.contains(footer)) footer = card;
+
+    // React may replace a field row while leaving an injected sibling behind.
+    // Own one launcher per card and remove stale panels from earlier renders.
+    const existing = this.rovoLaunchers.get(card);
+    scope.querySelectorAll('.jira-diff-rovo-card').forEach(wrapper => {
+      if (wrapper !== existing) wrapper.remove();
+    });
+    const signature = JSON.stringify([change, settings]);
+    if (existing?.isConnected && existing.parentElement === footer && existing.jiraDiffSignature === signature) return;
+    existing?.remove();
+
+    const wrapper = document.createElement('span');
+    wrapper.className = 'jira-diff-rovo-card';
+    if (footer === card) wrapper.classList.add('jira-diff-rovo-fallback');
+    wrapper.jiraDiffSignature = signature;
+    wrapper.setAttribute('aria-label', 'Jira Rovo change preview');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'diff-large-preview jira-diff-rovo-button';
+    button.textContent = 'View full diff';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const rows = card.matches(ROVO_ACTION_CARD) ? [...card.querySelectorAll(ROVO_FIELD_ROW)] : [];
+      const fields = rows.map(row => {
+        const label = row.querySelector('[data-testid$="card-fields-list.rich-text-field"]')?.textContent
+          ?.replace(/^Update\s+/i, '').trim() || 'Suggested field';
+        return { label: label.charAt(0).toUpperCase() + label.slice(1), ...this.getRovoChange(row) };
+      });
+      const latestChange = rows.length ? fields.find(field => field.oldText !== undefined) : this.getRovoChange(card) || change;
+      if (latestChange) {
+        body.hidden = true;
+        this.createLargePreview(latestChange.oldText, latestChange.newText, settings, fields);
+      } else {
+        body.hidden = false;
+        body.textContent = 'Hover a suggested field to load its comparison, then choose View full diff.';
+        body.setAttribute('role', 'status');
+      }
+    });
+    const body = document.createElement('span');
+    body.className = 'jira-diff-rovo-status';
+    body.hidden = true;
+    wrapper.append(button, body);
+    this.rovoLaunchers.set(card, wrapper);
+    let before = dismiss || accept;
+    while (before && before.parentElement !== footer && before !== footer) before = before.parentElement;
+    footer.insertBefore(wrapper, before === footer ? null : before || null);
+  },
+
+  enhanceRovoPreviews(settings = {}) {
+    this.rovoEnabled = settings.rovoPreviewsEnabled !== false;
+    const cards = this.findRovoConfirmationCards();
+    if (settings.rovoPreviewsEnabled === false) {
+      this.rovoPreviewValues = new WeakMap();
+      document.querySelectorAll('.jira-diff-rovo-card').forEach(card => card.remove());
+      document.querySelectorAll('[data-jira-diff-rovo-baseline]').forEach(card => card.removeAttribute('data-jira-diff-rovo-baseline'));
+      return;
+    }
+
+    for (const card of cards) {
+      this.addRovoCard(card, settings);
+    }
+  },
+
+  addLargePreviewButton(toolbar, oldText, newText, settings) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'diff-large-preview';
+    button.textContent = 'Open large preview';
+    button.addEventListener('click', () => this.createLargePreview(oldText, newText, settings));
+    toolbar.appendChild(button);
+  },
+
   createOriginalPreview(oldText, newText, settings) {
     const container = document.createElement('div');
     container.className = 'enhanced-diff original-diff';
     const toolbar = document.createElement('div');
     toolbar.className = 'diff-toolbar';
+    const title = document.createElement('span');
+    title.className = 'diff-toolbar-title';
+    title.textContent = 'Original values';
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'diff-view-toggle';
@@ -578,11 +981,9 @@ const DiffHighlighter = {
         this.debouncedEnhanceDiff();
       }
     });
-    const title = document.createElement('span');
-    title.className = 'diff-toolbar-title';
-    title.textContent = 'Original values';
     toolbar.append(title, toggle);
     container.appendChild(toolbar);
+    this.addLargePreviewButton(toolbar, oldText, newText, settings);
     return container;
   },
 
@@ -642,10 +1043,14 @@ const DiffHighlighter = {
 
     const toolbar = document.createElement('div');
     toolbar.className = 'diff-toolbar';
+    const title = document.createElement('span');
+    title.textContent = 'Before → After';
+    title.className = 'diff-toolbar-title';
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'diff-view-toggle';
-    toolbar.append(toggle);
+    toolbar.append(title, toggle);
+    this.addLargePreviewButton(toolbar, oldText, newText, settings);
     const body = document.createElement('div');
     body.className = 'diff-lines';
     container.appendChild(toolbar);
@@ -921,9 +1326,12 @@ const DiffHighlighter = {
     };
 
     window.diffObserver = new MutationObserver(muts => {
+      // Capture native hover text in the mutation microtask, before it can
+      // disappear while the user moves to our launcher.
+      this.captureRovoTooltips(muts);
       const relevant = muts.some(m =>
         (m.addedNodes.length || m.removedNodes.length || m.type === 'characterData' || m.type === 'attributes') &&
-        !(m.target instanceof Element ? m.target : m.target.parentElement)?.closest('.enhanced-diff, .jira-activity-shortcuts')
+        !(m.target instanceof Element ? m.target : m.target.parentElement)?.closest('.enhanced-diff, .jira-activity-shortcuts, .jira-diff-rovo-card, .jira-diff-large-preview-overlay')
       );
       if (relevant) triggerEnhance();
     });
@@ -932,7 +1340,7 @@ const DiffHighlighter = {
       childList: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['aria-selected', 'aria-pressed', 'aria-expanded', 'data-state'],
+      attributeFilter: ['aria-selected', 'aria-pressed', 'aria-expanded', 'aria-controls', 'aria-describedby', 'data-state'],
       subtree: true
     });
 
@@ -950,11 +1358,25 @@ const DiffHighlighter = {
       setTimeout(triggerEnhance, 200);
     };
     document.addEventListener('click', this.activityClickHandler, true);
+    this.rovoInteractionHandler = event => {
+      if (!(event.target instanceof Element)) return;
+      const row = event.target.closest(ROVO_FIELD_ROW);
+      if (row) this.activeRovoField = row;
+    };
+    for (const type of ['pointerover', 'mouseover', 'focusin']) {
+      document.addEventListener(type, this.rovoInteractionHandler, true);
+    }
   },
 
   disconnectObserver() {
     window.diffObserver?.disconnect();
     window.diffObserver = null;
+    if (this.rovoInteractionHandler) {
+      for (const type of ['pointerover', 'mouseover', 'focusin']) {
+        document.removeEventListener(type, this.rovoInteractionHandler, true);
+      }
+      this.rovoInteractionHandler = null;
+    }
     if (this.activityClickHandler) {
       document.removeEventListener('click', this.activityClickHandler, true);
       this.activityClickHandler = null;
@@ -963,6 +1385,12 @@ const DiffHighlighter = {
 
   async removeEnhancements() {
     try {
+      this.closeLargePreview?.();
+      this.rovoPreviewValues = new WeakMap();
+      this.rovoTooltipOwners = new WeakMap();
+      this.activeRovoField = null;
+      document.querySelectorAll('.jira-diff-rovo-card').forEach(card => card.remove());
+      document.querySelectorAll('[data-jira-diff-rovo-baseline]').forEach(card => card.removeAttribute('data-jira-diff-rovo-baseline'));
       if (!isExtensionValid()) return;
       for (const enhancedDiff of document.querySelectorAll('.enhanced-diff')) {
         const parentContainer = enhancedDiff.closest('div[id^="diff-container-"]');

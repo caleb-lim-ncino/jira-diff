@@ -6,6 +6,7 @@ const { JSDOM } = require('jsdom');
 
 const source = fs.readFileSync(path.join(__dirname, '../content/content.js'), 'utf8');
 const diffSource = fs.readFileSync(path.join(__dirname, '../lib/diff_match_patch.js'), 'utf8');
+const rovoTooltip = fs.readFileSync(path.join(__dirname, 'fixtures/rovo-field-tooltip.html'), 'utf8');
 
 async function setup(t, html) {
   const dom = new JSDOM(html, {
@@ -211,7 +212,293 @@ test('zero context shows only changes in separate hunks and highlights changed w
   assert.equal(document.querySelector('.diff-word-added').textContent, 'blue');
 });
 
+test('large preview expands Git diffs without changing the page', async t => {
+  const { document, highlighter } = await setup(t, row('Product Copy', 'First\nBefore', 'First\nAfter'));
+  await highlighter.enhanceDiff();
 
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay'), null);
+  document.querySelector('.diff-large-preview').click();
+  assert.equal(document.querySelectorAll('.jira-diff-large-preview-overlay').length, 1);
+  assert.equal(document.querySelectorAll('.jira-diff-large-preview-overlay .diff-split-row').length, 2);
+  document.querySelector('.jira-diff-preview-close').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay'), null);
+});
+
+test('Rovo accept cards gain a read-only large preview', async t => {
+  const { document, highlighter } = await setup(t, `
+    <article data-testid="rovo-review-card">
+      <section><h4>Description</h4><div id="rovo-field" contenteditable="true">Old description</div></section>
+      <section>Accept changes</section>
+    </article>
+  `);
+  const card = document.querySelector('[data-testid="rovo-review-card"]');
+
+  highlighter.enhanceRovoPreviews({});
+  document.getElementById('rovo-field').textContent = 'New description';
+  highlighter.enhanceRovoPreviews({});
+
+  const previewCard = card.querySelector('.jira-diff-rovo-card');
+  assert.ok(previewCard);
+  assert.equal(previewCard.textContent.includes('Accept changes'), false);
+  previewCard.querySelector('.diff-large-preview').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-removed .diff-line-text').textContent, 'Old description');
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-added .diff-line-text').textContent, 'New description');
+});
+
+test('Rovo preview setting adds and removes acceptance preview cards', async t => {
+  const { document, highlighter, settings } = await setup(t, `
+    <article data-testid="rovo-review-card">
+      <section><h4>Description</h4><div id="rovo-field" contenteditable="true">Old description</div></section>
+      <section>Accept changes</section>
+    </article>
+  `);
+  const card = document.querySelector('[data-testid="rovo-review-card"]');
+
+  settings.rovoPreviewsEnabled = false;
+  document.getElementById('rovo-field').textContent = 'New description';
+  await highlighter.enhanceDiff();
+  assert.equal(card.querySelector('.jira-diff-rovo-card'), null);
+
+  settings.rovoPreviewsEnabled = true;
+  await highlighter.enhanceDiff();
+  assert.equal(card.getAttribute('data-jira-diff-rovo-baseline'), 'New description');
+
+  settings.rovoPreviewsEnabled = false;
+  await highlighter.enhanceDiff();
+  assert.equal(card.querySelector('.jira-diff-rovo-card'), null);
+  assert.equal(card.hasAttribute('data-jira-diff-rovo-baseline'), false);
+  assert.equal(document.getElementById('rovo-field').textContent, 'New description');
+});
+
+test('Rovo Accept all cards preview current versus suggested values', async t => {
+  const { document, highlighter } = await setup(t, `
+    <article data-testid="rovo-accept-all">
+      <section><h4>Current acceptance criteria</h4><div id="current-criteria">Old criteria</div></section>
+      <section><h4>Suggested update</h4><div>New criteria</div></section>
+      <button>Accept all</button>
+    </article>
+  `);
+  const card = document.querySelector('[data-testid="rovo-accept-all"]');
+
+  highlighter.enhanceRovoPreviews({});
+  document.getElementById('current-criteria').textContent = 'Changed criteria';
+  highlighter.enhanceRovoPreviews({});
+
+  const previewCard = card.querySelector('.jira-diff-rovo-card');
+  assert.ok(previewCard);
+  previewCard.querySelector('.diff-large-preview').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-removed .diff-line-text').textContent, 'Changed criteria');
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-added .diff-line-text').textContent, 'New criteria');
+});
+
+// Stable Jira hooks from the supplied Rovo card, with issue content redacted.
+function rovoActionCard(anchor = '--anchor-test') {
+  return `<div data-testid="update-work-item-all-fields-action-renderer.ui.action-card">
+    <div data-testid="update-work-item-all-fields-action-renderer.ui.action-card.card-header">
+      <button>TEST-1</button><button aria-expanded="true">Collapse suggestions</button>
+    </div>
+    <div><div tabindex="0" data-testid="update-work-item-all-fields-action-renderer.ui.card-fields-list" style="anchor-name: ${anchor};">
+      <span role="img" aria-label="Action completed"></span>
+      <span data-testid="update-work-item-all-fields-action-renderer.ui.action-card.card-fields-list.rich-text-field">Update acceptance criteria</span>
+      <div data-testid="update-work-item-all-fields-action-renderer.ui.card-fields-list.action-buttons">
+        <button disabled><span>Accept</span></button><button disabled><span>Dismiss</span></button>
+      </div>
+    </div></div>
+    <div class="native-card-footer"><button>Dismiss</button><button>Accept all</button></div>
+  </div>`;
+}
+
+test('supplied Rovo action card gains one launcher without requiring Accept all or changing native controls', async t => {
+  const { document, highlighter } = await setup(t, rovoActionCard());
+  const card = document.querySelector('[data-testid$="ui.action-card"]');
+  const nativeContent = card.innerHTML;
+  let nativeClicks = 0;
+  card.querySelectorAll('button').forEach(button => button.addEventListener('click', () => nativeClicks++));
+  await highlighter.enhanceDiff();
+  await highlighter.enhanceDiff();
+  assert.equal(card.querySelectorAll('.jira-diff-rovo-card').length, 1);
+  const launcher = card.querySelector('.jira-diff-rovo-card');
+  assert.equal(launcher.parentElement.className, 'native-card-footer');
+  assert.equal(card.querySelector('aside'), null);
+  assert.equal(launcher.querySelector('button').textContent, 'View full diff');
+  launcher.querySelector('button').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay'), null);
+  assert.match(launcher.querySelector('[role="status"]').textContent, /Hover a suggested field/);
+  assert.equal(nativeClicks, 0);
+  await highlighter.removeEnhancements();
+  assert.equal(card.innerHTML, nativeContent);
+});
+
+test('Rovo footer survives field and footer replacement without duplicate or stale panels', async t => {
+  const { document, highlighter } = await setup(t, rovoActionCard());
+  const card = document.querySelector('[data-testid$="ui.action-card"]');
+  await highlighter.enhanceDiff();
+  const row = card.querySelector('[data-testid$="ui.card-fields-list"]');
+  row.replaceWith(row.cloneNode(true));
+  card.insertAdjacentHTML('beforeend', '<aside class="jira-diff-rovo-card">Stale description diff</aside>');
+  await highlighter.enhanceDiff();
+  const footer = card.querySelector('.native-card-footer');
+  assert.equal(card.querySelectorAll('.jira-diff-rovo-card').length, 1);
+  assert.equal(footer.querySelectorAll('.diff-large-preview').length, 1);
+  assert.equal(card.textContent.includes('Stale description diff'), false);
+  footer.innerHTML = '<button>Dismiss</button><button>Accept all</button>';
+  await highlighter.enhanceDiff();
+  await highlighter.enhanceDiff();
+  assert.equal(card.querySelectorAll('.diff-large-preview').length, 1);
+  assert.deepEqual([...footer.querySelectorAll('button')].map(button => button.textContent), ['View full diff', 'Dismiss', 'Accept all']);
+});
+
+test('Rovo shared actions outside the fields renderer still receive one footer button', async t => {
+  const { document, highlighter } = await setup(t, `<section id="outer-card">${rovoActionCard()}</section>`);
+  const outer = document.getElementById('outer-card');
+  outer.appendChild(outer.querySelector('.native-card-footer'));
+  await highlighter.enhanceDiff();
+  await highlighter.enhanceDiff();
+  assert.equal(outer.querySelectorAll('.jira-diff-rovo-card').length, 1);
+  assert.equal(outer.querySelector('.diff-large-preview').parentElement.parentElement.className, 'native-card-footer');
+});
+
+test('Rovo previews follow the matching portal anchor and retain values after the hover panel closes', async t => {
+  const { document, highlighter } = await setup(t, rovoActionCard() + rovoActionCard('--anchor-other'));
+  const cards = document.querySelectorAll('[data-testid$="ui.action-card"]');
+  highlighter.enhanceRovoPreviews({});
+  document.body.insertAdjacentHTML('beforeend', `<div id="portal" style="position-anchor: --anchor-test;">
+    <section><h4>Current acceptance criteria</h4><div><p>Unchanged</p><p>Old criteria</p></div></section>
+    <section><h4>Suggested update</h4><div><p>Unchanged</p><p>New criteria</p></div></section>
+  </div>`);
+  highlighter.enhanceRovoPreviews({});
+  document.getElementById('portal').remove();
+  cards[0].querySelector('.diff-large-preview').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-removed .diff-line-text').textContent, 'Old criteria');
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-added .diff-line-text').textContent, 'New criteria');
+  assert.ok(document.querySelector('.jira-diff-large-preview-overlay .diff-context'));
+  document.querySelector('.jira-diff-preview-close').click();
+  cards[1].querySelector('.diff-large-preview').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay'), null);
+});
+
+test('supplied unlinked Rovo hover tooltip opens the full values beyond its CSS line clamps', async t => {
+  const { document, highlighter } = await setup(t, rovoTooltip);
+  const tooltip = document.querySelector('[data-testid$="field-tooltip-content"]');
+  const nativeCurrent = tooltip.querySelector('[data-testid$=".current"]');
+  const nativeSuggested = tooltip.querySelector('[data-testid$=".suggested"]');
+  const originals = [nativeCurrent.innerHTML, nativeSuggested.innerHTML];
+  await highlighter.enhanceDiff();
+  assert.equal(tooltip.querySelector('.jira-diff-rovo-card'), null);
+  const { oldText, newText } = highlighter.getRovoExplicitChange(tooltip);
+  highlighter.createLargePreview(oldText, newText);
+  const texts = [...document.querySelectorAll('.jira-diff-large-preview-overlay .diff-after .diff-line-text')].map(line => line.textContent);
+  assert.equal(texts.at(-1), 'hi');
+  assert.ok(texts.includes('Existing question.'));
+  assert.ok(texts.includes('## Today'));
+  assert.equal(texts.length, 13);
+  assert.equal(nativeCurrent.innerHTML, originals[0]);
+  assert.equal(nativeSuggested.innerHTML, originals[1]);
+});
+
+test('hover capture connects the supplied unlinked tooltip to its field and survives immediate removal', async t => {
+  const { document, highlighter, window, message } = await setup(t,
+    rovoActionCard().replace('Update acceptance criteria', 'Update description') + rovoActionCard('--anchor-other'));
+  const cards = document.querySelectorAll('[data-testid$="ui.action-card"]');
+  await highlighter.enhanceDiff();
+  highlighter.setupObserver();
+  cards[0].querySelector('[data-testid$="ui.card-fields-list"]').dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
+  document.body.insertAdjacentHTML('beforeend', rovoTooltip);
+  // No debounce wait: the tooltip can close before the 250 ms enhancement.
+  await new Promise(resolve => setImmediate(resolve));
+  document.querySelector('.Tooltip').remove();
+  cards[0].querySelector('.diff-large-preview').click();
+  assert.ok([...document.querySelectorAll('.jira-diff-large-preview-overlay .diff-added .diff-line-text')].some(line => line.textContent === 'hi'));
+  document.querySelector('.jira-diff-preview-close').click();
+  cards[1].querySelector('.diff-large-preview').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay'), null);
+  await message({ action: 'toggleExtension', enabled: false });
+  assert.equal(document.querySelector('.jira-diff-rovo-card'), null);
+  assert.equal(highlighter.rovoInteractionHandler, null);
+});
+
+test('multiple fields in one Rovo card retain separate hover comparisons', async t => {
+  const { document, highlighter, window } = await setup(t, rovoActionCard());
+  const first = document.querySelector('[data-testid$="ui.card-fields-list"]');
+  const second = first.cloneNode(true);
+  first.querySelector('[data-testid$="card-fields-list.rich-text-field"]').textContent = 'Update description';
+  first.parentElement.appendChild(second);
+  await highlighter.enhanceDiff();
+  highlighter.setupObserver();
+  for (const [row, html] of [[first, rovoTooltip], [second, rovoTooltip.replace('Current description', 'Current acceptance criteria').replace('\nhi</span>', '\nNew criteria</span>')]]) {
+    row.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
+    document.body.insertAdjacentHTML('beforeend', html);
+    await new Promise(resolve => setImmediate(resolve));
+    document.querySelector('.Tooltip').remove();
+  }
+  const launchers = document.querySelectorAll('.jira-diff-rovo-card');
+  assert.equal(launchers.length, 1);
+  const additions = () => [...document.querySelectorAll('.jira-diff-large-preview-overlay .diff-added .diff-line-text')].map(line => line.textContent);
+  launchers[0].querySelector('button').click();
+  assert.ok(additions().includes('hi'));
+  assert.equal(additions().includes('New criteria'), false);
+  const selector = document.querySelector('.jira-diff-preview-field');
+  assert.deepEqual([...selector.options].map(option => option.textContent), ['Description', 'Acceptance criteria']);
+  selector.selectedIndex = 1;
+  selector.dispatchEvent(new window.Event('change'));
+  assert.ok(additions().includes('New criteria'));
+  assert.equal(additions().includes('hi'), false);
+});
+
+test('wrapped Accept changes buttons support Description values already rendered on first detection', async t => {
+  const { document, highlighter } = await setup(t, `<article>
+    <section><div><span>Current description</span></div><div>Before</div></section>
+    <section><div><span>Suggested description</span></div><div>After</div></section>
+    <div data-testid="actions"><button data-testid="accept-button"><span>Accept changes</span></button></div>
+  </article>`);
+  await highlighter.enhanceDiff();
+  document.querySelector('.jira-diff-rovo-card button').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-removed .diff-line-text').textContent, 'Before');
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-added .diff-line-text').textContent, 'After');
+});
+
+test('Rovo explicit comparisons support empty original or suggested values', async t => {
+  const { document, highlighter } = await setup(t, `<article>
+    <section><h4>Current description</h4><div>Before</div></section>
+    <section><h4>Suggested update</h4><div></div></section>
+    <button>Accept changes</button>
+  </article>`);
+  await highlighter.enhanceDiff();
+  document.querySelector('.jira-diff-rovo-card button').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-removed .diff-line-text').textContent, 'Before');
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-added'), null);
+});
+
+test('Rovo native rich-text insertions and deletions reconstruct both versions', async t => {
+  const { document, highlighter } = await setup(t, `<article>
+    <div class="ak-renderer-document"><p>Same</p><p>Buy <del>red</del><ins>blue</ins> shoes</p><p>Footer</p></div>
+    <button>Accept changes</button>
+  </article>`);
+  const native = document.querySelector('.ak-renderer-document');
+  const original = native.innerHTML;
+  await highlighter.enhanceDiff();
+  document.querySelector('.jira-diff-rovo-card button').click();
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-removed .diff-line-text').textContent, 'Buy red shoes');
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay .diff-added .diff-line-text').textContent, 'Buy blue shoes');
+  assert.equal(native.innerHTML, original);
+});
+
+test('full previews show long changes immediately, trap focus and close on disable', async t => {
+  const { document, highlighter, window, message } = await setup(t, '<button id="opener">Open</button>');
+  document.getElementById('opener').focus();
+  highlighter.createLargePreview('Same\n' + 'Old '.repeat(160), 'Same\n' + 'New '.repeat(160), { diffView: 'original' });
+  const overlay = document.querySelector('.jira-diff-large-preview-overlay');
+  assert.ok(overlay.querySelector('.diff-context'));
+  assert.equal(overlay.querySelector('.large-change-toggle'), null);
+  assert.equal(overlay.querySelector('.diff-added .diff-line-text').textContent, 'New '.repeat(160));
+  const controls = [...overlay.querySelectorAll('button, [tabindex="0"]')];
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, cancelable: true }));
+  assert.equal(document.activeElement, controls.at(-1));
+  await message({ action: 'toggleExtension', enabled: false });
+  assert.equal(document.querySelector('.jira-diff-large-preview-overlay'), null);
+  assert.equal(document.body.classList.contains('jira-diff-preview-open'), false);
+  assert.equal(document.activeElement.id, 'opener');
+});
 
 test('line diff preserves whitespace, blank lines, repeated lines and final newline changes', async t => {
   const { highlighter } = await setup(t, '');

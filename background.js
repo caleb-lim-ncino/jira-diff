@@ -91,7 +91,11 @@ chrome.runtime.onInstalled.addListener(async () => {
     const tabs = await chrome.tabs.query({ url: cs.matches });
 
     for (const tab of tabs) {
-      if (/^(chrome|chrome-extension):\/\//i.test(tab.url)) continue;
+      if (!Number.isInteger(tab.id) || !/^https?:\/\//i.test(tab.url || '')) continue;
+      const origin = new URL(tab.url).origin;
+      // Matching the manifest does not mean the user has granted access to
+      // this site. Respect restricted site access when refreshing open tabs.
+      if (!await hasOriginPermission(`${origin}/*`)) continue;
 
       try {
         if (cs.css?.length) {
@@ -106,7 +110,14 @@ chrome.runtime.onInstalled.addListener(async () => {
           injectImmediately: cs.run_at === 'document_start'
         });
       } catch (err) {
-        console.error('Failed to inject content script via scripting API:', err);
+        if (/Cannot access contents of (?:the page|url)|Missing host permission/i.test(err?.message || '')) {
+          // Chrome can withhold per-site access even when permissions.contains
+          // reports the declared host permission. Normal navigation will inject
+          // the script once the user grants access through the browser UI.
+          console.info(`Jira Diff Highlighter: site access is required for ${origin}.`);
+        } else {
+          console.error(`Failed to inject content script via scripting API (${origin}):`, err);
+        }
       }
     }
   }

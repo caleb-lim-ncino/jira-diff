@@ -7,10 +7,12 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8');
 
 function setup({ registrationFails = false, firstTabFails = false,
+  injectionError = 'Tab closed', deniedHosts = [],
   allowedDomains = ['jira.example.com'], origins = ['https://jira.example.com/*'] } = {}) {
   let installed;
   const injections = [];
   const errors = [];
+  const notices = [];
   const registrations = [];
   const event = () => ({ addListener() {} });
   const chrome = {
@@ -23,7 +25,7 @@ function setup({ registrationFails = false, firstTabFails = false,
     },
     permissions: {
       getAll(callback) { callback({ origins }); },
-      contains(origins, callback) { callback(true); },
+      contains({ origins: requested }, callback) { callback(!deniedHosts.includes(new URL(requested[0]).hostname)); },
     },
     storage: { sync: { async get() { return { allowedDomains }; } }, onChanged: event() },
     tabs: {
@@ -36,12 +38,14 @@ function setup({ registrationFails = false, firstTabFails = false,
       async insertCSS(args) { injections.push({ type: 'css', ...args }); },
       async executeScript(args) {
         injections.push({ type: 'js', ...args });
-        if (firstTabFails && args.target.tabId === 1) throw new Error('Tab closed');
+        if (firstTabFails && args.target.tabId === 1) throw new Error(injectionError);
       },
     },
   };
-  vm.runInNewContext(source, { chrome, console: { error(...args) { errors.push(args); } } });
-  return { installed, injections, errors, registrations };
+  vm.runInNewContext(source, { chrome, URL, console: {
+    error(...args) { errors.push(args); }, info(...args) { notices.push(args); },
+  } });
+  return { installed, injections, errors, registrations, notices };
 }
 
 test('install injects the stylesheet before JavaScript into each open Jira tab', async () => {
@@ -67,6 +71,23 @@ test('an injection failure in one tab does not stop loading other Jira tabs', as
   assert.equal(injections.length, 4);
   assert.equal(errors.length, 1);
   assert.match(errors[0][0], /Failed to inject content script/);
+});
+
+test('reload skips pages without granted site access', async () => {
+  const { installed, injections, errors } = setup({ deniedHosts: ['team.atlassian.net'] });
+  await installed();
+  assert.equal(injections.length, 0);
+  assert.equal(errors.length, 0);
+});
+
+test('Chrome withheld site access is reported without an extension error and other tabs still load', async () => {
+  const { installed, injections, errors, notices } = setup({ firstTabFails: true,
+    injectionError: 'Cannot access contents of the page. Extension manifest must request permission to access the respective host.' });
+  await installed();
+  assert.equal(errors.length, 0);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0][0], /site access is required for https:\/\/team.atlassian.net/);
+  assert.deepEqual(injections.filter(call => call.target.tabId === 2).map(call => call.type), ['css', 'js']);
 });
 
 test('blank and null domain entries are ignored without blocking registration or injection', async () => {

@@ -12,6 +12,7 @@ Jira Diff Highlighter is a cross-browser extension (Chrome & Firefox) that enhan
 - **Highlighted Changes**: Color-codes additions, deletions, and modifications for quick identification.
 - **Configurable Large Change Handling**: Collapses large insertions and deletions above your chosen character limit, with one-click access to show the full text.
 - **Toggle Functionality**: Easily switch between enhanced and original diff views.
+- **Rovo Change Previews**: When Jira Rovo shows a change-acceptance card, adds a read-only large diff preview and keeps acceptance with Jira's own controls. Disable this with **Show Rovo change previews** in the popup.
 - **Multi-Tab Support**: Maintains consistent state across multiple Jira tabs.
   
 ---
@@ -33,7 +34,10 @@ Jira Diff Highlighter is a cross-browser extension (Chrome & Firefox) that enhan
 - **Context around changes** defaults to `0` for strictly changed lines. Set it to `3` for the usual Git context, or any value up to `20`. Use **Show all lines** or **Show unchanged lines** inside a preview to expand it temporarily.
 - Existing saved preview choices are retained after an update; select **Git side-by-side - changed lines** to switch an existing installation to the new default view.
 - Set the large change limit from the extension popup. The default is 500 characters, and collapsed changes can be expanded inline with "Show full text".
+- Rovo work-item update cards include one **View full diff** button beside **Dismiss** and **Accept all**. Hover a suggested field first so Jira renders its current and suggested values, then click the footer button. The extension captures the full tooltip text, including lines Jira visually clips, and retains it after the hover preview closes. For cards with several fields, choose a field inside the full preview. The diff lines scroll independently beneath the preview controls. Accept or dismiss updates with Jira's native controls.
+- Disable **Show Rovo change previews** in the extension popup if the acceptance card should stay untouched.
 - The extension works on Atlassian-hosted Jira pages by default. Custom Jira domains can be enabled from the extension popup with per-site access.
+- If Chrome reports that it cannot access a page, open the extension's **Details → Site access**, allow your Jira site, and refresh Jira. Automatic injection after an extension reload skips sites without granted access.
 
 ---
 

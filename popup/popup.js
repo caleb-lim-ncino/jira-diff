@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
     contextLinesSetting: document.getElementById('contextLinesSetting'),
     activityTabsEnabled: document.getElementById('activityTabsEnabled'),
     defaultActivityFilter: document.getElementById('defaultActivityFilter'),
+    rovoPreviewsEnabled: document.getElementById('rovoPreviewsEnabled'),
     domainInput: document.getElementById('allowedDomains'),
     addDomain: document.getElementById('addDomain'),
     domainList: document.getElementById('domainList'),
@@ -210,7 +211,8 @@ document.addEventListener('DOMContentLoaded', () => {
       'diffView',
       'contextLines',
       'activityTabsEnabled',
-      'defaultActivityFilter'
+      'defaultActivityFilter',
+      'rovoPreviewsEnabled'
     ]);
     const configuredDomains = normalizeDomains(data.allowedDomains);
     const grantedDomains = await permissionDomains();
@@ -224,6 +226,7 @@ document.addEventListener('DOMContentLoaded', () => {
     els.activityTabsEnabled.checked = data.activityTabsEnabled !== false;
     els.defaultActivityFilter.value = normalizeActivityFilter(data.defaultActivityFilter);
     els.defaultActivityFilter.disabled = !els.activityTabsEnabled.checked;
+    els.rovoPreviewsEnabled.checked = data.rovoPreviewsEnabled !== false;
     state.domains = [...new Set([...configuredDomains, ...grantedDomains])];
     renderDomains();
 
@@ -269,6 +272,11 @@ document.addEventListener('DOMContentLoaded', () => {
   els.defaultActivityFilter.addEventListener('change', async () => {
     await storageSet({ defaultActivityFilter: normalizeActivityFilter(els.defaultActivityFilter.value) });
     setStatus('Default activity filter saved.', 'success');
+    applyToCurrentTab(state.domains);
+  });
+  els.rovoPreviewsEnabled.addEventListener('change', async () => {
+    await storageSet({ rovoPreviewsEnabled: els.rovoPreviewsEnabled.checked });
+    setStatus('Rovo change previews saved.', 'success');
     applyToCurrentTab(state.domains);
   });
   els.addDomain.addEventListener('click', addDomain);

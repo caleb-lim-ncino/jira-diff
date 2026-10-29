@@ -126,3 +126,17 @@ test('popup ignores null, blank and non-string saved domains', async t => {
   const { document } = await setup(t, { allowedDomains: [null, '', ' ', 123, 'https://jira.example.com/path'] });
   assert.deepEqual([...document.querySelectorAll('.domain-item span')].map(label => label.textContent), ['jira.example.com']);
 });
+
+test('popup saves the Rovo change preview setting and enables it by default', async t => {
+  const { window, document, settings } = await setup(t);
+  const toggle = document.getElementById('rovoPreviewsEnabled');
+  assert.equal(toggle.checked, true);
+
+  toggle.checked = false;
+  toggle.dispatchEvent(new window.Event('change'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settings.rovoPreviewsEnabled, false);
+
+  const saved = await setup(t, { rovoPreviewsEnabled: false });
+  assert.equal(saved.document.getElementById('rovoPreviewsEnabled').checked, false);
+});
